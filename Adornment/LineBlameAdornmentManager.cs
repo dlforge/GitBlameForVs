@@ -1,10 +1,10 @@
 ﻿using GitBlameForVs.GitBlame;
+using GitBlameForVs.Localization;
 using Microsoft.VisualStudio.Text;
 using Microsoft.VisualStudio.Text.Editor;
 using Microsoft.VisualStudio.Text.Formatting;
 using System;
 using System.IO;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -31,7 +31,7 @@ namespace GitBlameForVs.Adornment
         // 任何让内容恢复一致的方式都能被正确识别。
         private ITextSnapshot? _baselineSnapshot;
         private CancellationTokenSource? _debounceCts;
-        private DateTime? _lastEditTime;
+        private DateTimeOffset? _lastEditTime;
         private long _updateGeneration = 0;
 
         public LineBlameAdornmentManager(IWpfTextView textView)
@@ -64,7 +64,7 @@ namespace GitBlameForVs.Adornment
 
         private void OnBufferChanged(object sender, TextContentChangedEventArgs e)
         {
-            _lastEditTime = DateTime.Now;
+            _lastEditTime = DateTimeOffset.Now;
             RequestUpdate();
         }
 
@@ -153,15 +153,6 @@ namespace GitBlameForVs.Adornment
             RenderAdornment(viewLine, blame);
         }
 
-        private static string FormatRelativeTime(DateTime time)
-        {
-            var elapsed = DateTime.Now - time;
-            if (elapsed.TotalSeconds < 60) return "刚刚";
-            if (elapsed.TotalMinutes < 60) return $"{(int)elapsed.TotalMinutes} 分钟前";
-            if (elapsed.TotalHours < 24) return $"{(int)elapsed.TotalHours} 小时前";
-            return $"{(int)elapsed.TotalDays} 天前";
-        }
-
         /// <summary>
         /// 判断当前行的内容，是否和基准快照（最后一次已知与磁盘一致的版本）
         /// 里"同一位置"的行内容不同。用位置映射而不是裸行号比较，
@@ -198,19 +189,8 @@ namespace GitBlameForVs.Adornment
 
         private void RenderAdornment(ITextViewLine line, GitBlameInfo blame)
         {
-            string? text = default;
-            Cursor? cursor = default;
-            if (blame.IsUncommitted)
-            {
-                string relativeTime = FormatRelativeTime(_lastEditTime ?? DateTime.Now);
-                text = $"You, {relativeTime} · 未提交的更改";
-                cursor = Cursors.Arrow;
-            }
-            else
-            {
-                text = blame.ToShortText();
-                cursor = Cursors.Hand;
-            }
+            string text = BlameText.Current.FormatInline(blame, _lastEditTime);
+            Cursor cursor = blame.IsUncommitted ? Cursors.Arrow : Cursors.Hand;
             var normalBrush = new SolidColorBrush(Colors.Gray);
             var textBlock = new TextBlock
             {
@@ -224,7 +204,7 @@ namespace GitBlameForVs.Adornment
 
             var toolTip = new ToolTip
             {
-                Content = "加载中...",
+                Content = BlameText.Current.TooltipLoading,
                 FontFamily = _textView.FormattedLineSource.DefaultTextProperties.Typeface.FontFamily,
                 FontSize = _textView.FormattedLineSource.DefaultTextProperties.FontRenderingEmSize,
                 BorderThickness = new Thickness(1),
@@ -258,36 +238,29 @@ namespace GitBlameForVs.Adornment
             }
             catch (Exception ex)
             {
-                toolTip.Content = "加载提交信息失败";
+                toolTip.Content = BlameText.Current.TooltipLoadFailed;
             }
         }
 
         private async Task LoadTooltipContentAsync(ToolTip toolTip, GitBlameInfo blame)
         {
-            if (blame.IsUncommitted)
+            string? fullMessage = null;
+            if (!blame.IsUncommitted)
             {
-                return;
+                string filePath = GetFilePath();
+                string? workingDir = string.IsNullOrEmpty(filePath) ? null : Path.GetDirectoryName(filePath);
+
+                fullMessage = workingDir != null
+                    ? await _messageCache.GetOrFetchAsync(workingDir, blame.CommitHash)
+                    : null;
             }
 
-            string filePath = GetFilePath();
-            string? workingDir = string.IsNullOrEmpty(filePath) ? null : Path.GetDirectoryName(filePath);
-
-            string? fullMessage = workingDir != null
-                ? await _messageCache.GetOrFetchAsync(workingDir, blame.CommitHash)
-                : null;
-
-            var sb = new StringBuilder();
-            sb.AppendLine($"提交: {blame.CommitHash}");
-            sb.AppendLine($"作者: {blame.Author}");
-            sb.AppendLine($"时间: {blame.AuthorTime.ToString("yyyy-MM-dd HH:mm:ss")}");
-            sb.AppendLine();
-            sb.Append(!string.IsNullOrWhiteSpace(fullMessage) ? fullMessage : blame.Summary);
-            toolTip.Content = sb.ToString();
+            toolTip.Content = BlameText.Current.FormatTooltip(blame, fullMessage);
         }
 
         private void OnBlameLeftClick(TextBlock textBlock, GitBlameInfo blame)
         {
-            CopyToClipboardWithFeedback(textBlock, blame.CommitHash!, "已复制 hash");
+            CopyToClipboardWithFeedback(textBlock, blame.CommitHash!, BlameText.Current.CopyHashFeedback);
         }
 
         private void CopyToClipboardWithFeedback(TextBlock textBlock, string content, string feedbackText)
@@ -304,7 +277,7 @@ namespace GitBlameForVs.Adornment
             string originalText = textBlock.Text;
             var originalBrush = textBlock.Foreground;
 
-            textBlock.Text = "  ✓ " + feedbackText;
+            textBlock.Text = BlameText.Current.CopySuccessPrefix + feedbackText;
             textBlock.Foreground = Brushes.LimeGreen;
 
             var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1200) };

@@ -1,7 +1,11 @@
-﻿using System;
+using System;
 
 namespace GitBlameForVs.GitBlame
 {
+    /// <summary>
+    /// 单行 blame 信息的数据模型，不包含任何展示/格式化逻辑。
+    /// 文案格式化统一由 Localization 层的 IBlameTextProvider 负责。
+    /// </summary>
     public class GitBlameInfo
     {
         /// <summary>
@@ -34,38 +38,5 @@ namespace GitBlameForVs.GitBlame
         /// </summary>
         public bool IsUncommitted =>
             CommitHash == UncommittedHash;
-
-
-        public string GetMarginText()
-        {
-            if (IsUncommitted) return string.Empty;
-            return $"{CommitHash!.Substring(0, 7)} {Summary!.Substring(0, Math.Min(Summary.Length, 20))}";
-        }
-
-        /// <summary>
-        /// 获取一个值，指示此提交是否为有效的提交（即不是未提交的更改）。
-        /// </summary>
-        /// <returns></returns>
-        public string ToShortText()
-        {
-            if (IsUncommitted) return "未提交的更改";
-            var when = HumanizeTimeAgo(AuthorTime);
-            return $"{Author}, {when} • {Summary}";
-        }
-
-        /// <summary>
-        /// 将时间转换为“多久以前”的格式。
-        /// </summary>
-        /// <param name="time">要转换的时间。</param>
-        /// <returns>表示时间间隔的字符串。</returns>
-        private static string HumanizeTimeAgo(DateTimeOffset time)
-        {
-            var span = DateTimeOffset.Now - time;
-            if (span.TotalDays > 365) return $"{(int)(span.TotalDays / 365)} 年前";
-            if (span.TotalDays > 30) return $"{(int)(span.TotalDays / 30)} 个月前";
-            if (span.TotalDays >= 1) return $"{(int)span.TotalDays} 天前";
-            if (span.TotalHours >= 1) return $"{(int)span.TotalHours} 小时前";
-            return "刚刚";
-        }
     }
 }
