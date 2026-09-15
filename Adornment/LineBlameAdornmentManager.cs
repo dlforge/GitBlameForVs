@@ -19,43 +19,47 @@ namespace GitBlameForVs.Adornment
     {
         public const string LayerName = "GitBlameForVsBlameLayer";
         private readonly IWpfTextView _textView;
-        private readonly IAdornmentLayer _layer;
+        private readonly IAdornmentLayer? _layer;
         private readonly GitBlameCache _cache = new();
         private readonly CommitMessageCache _messageCache = new();
-        private readonly ITextDocument _document;
+        private readonly ITextDocument? _document;
 
         // 基准快照：代表"最后一次已知与磁盘内容一致"的版本。
         // 文件打开时、每次保存后都会更新为当时的快照。
         // 判断某一行是否为脏行，靠把当前行位置映射回这个快照做内容比较，
         // 而不是记录"有没有发生过编辑"，这样撤销、手动改回原样等
         // 任何让内容恢复一致的方式都能被正确识别。
-        private ITextSnapshot _baselineSnapshot;
-        private CancellationTokenSource _debounceCts;
+        private ITextSnapshot? _baselineSnapshot;
+        private CancellationTokenSource? _debounceCts;
         private DateTime? _lastEditTime;
         private long _updateGeneration = 0;
 
         public LineBlameAdornmentManager(IWpfTextView textView)
         {
-            _textView = textView;
             _layer = textView.GetAdornmentLayer(LayerName);
+            if (_layer == null)
+            {
+                return;
+            }
 
+            _textView = textView;
             _textView.TextBuffer.Properties.TryGetProperty(
                 typeof(ITextDocument), out _document);
 
-            if(_document == null)
+            if (_document == null)
             {
                 return;
             }
 
             _baselineSnapshot = _textView.TextBuffer.CurrentSnapshot;
-            _ = RefreshUncommittedStatusAsync(_document.FilePath);
-
             _textView.Caret.PositionChanged += OnCaretPositionChanged;
             _textView.LayoutChanged += OnLayoutChanged;
             _textView.TextBuffer.Changed += OnBufferChanged;
             _textView.Closed += OnClosed;
             _document.FileActionOccurred += OnFileActionOccurred;
-            _cache.EnsurePrefetchStarted(_document.FilePath);
+
+            _ = _cache.EnsurePrefetchStartedAsync(_document.FilePath);
+            _ = RefreshUncommittedStatusAsync(_document.FilePath);
         }
 
         private void OnBufferChanged(object sender, TextContentChangedEventArgs e)
@@ -145,7 +149,7 @@ namespace GitBlameForVs.Adornment
 
             if (!IsLatest(generation)) return;
 
-            _layer.RemoveAllAdornments();
+            _layer!.RemoveAllAdornments();
             RenderAdornment(viewLine, blame);
         }
 
