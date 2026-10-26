@@ -12,8 +12,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using Ellipse = System.Windows.Shapes.Ellipse;
 using WpfPath = System.Windows.Shapes.Path;
 
@@ -362,15 +364,7 @@ namespace GitBlameForVs.Adornment
             inlineBlameBorder.MouseEnter += (_, _) => inlineBlameBorder.Background = hoverBackground;
             inlineBlameBorder.MouseLeave += (_, _) => inlineBlameBorder.Background = Brushes.Transparent;
 
-            var toolTip = new ToolTip
-            {
-                Content = BlameText.TooltipLoading,
-                FontFamily = _textView.FormattedLineSource.DefaultTextProperties.Typeface.FontFamily,
-                FontSize = _textView.FormattedLineSource.DefaultTextProperties.FontRenderingEmSize,
-                BorderThickness = new Thickness(1),
-            };
-            inlineBlameBorder.ToolTip = toolTip;
-            toolTip.Opened += (s, e) => _ = OnToolTipOpenedAsync(toolTip, blame);
+            CreateTooltipPopup(inlineBlameBorder, blame);
 
             if (!blame.IsUncommitted)
                 inlineBlameBorder.ContextMenu = CreateCommitContextMenu(blame);
@@ -578,35 +572,106 @@ namespace GitBlameForVs.Adornment
                 removedCallback: null);
         }
 
-        private async Task OnToolTipOpenedAsync(ToolTip toolTip, BlameEntry blame)
+        private Popup CreateTooltipPopup(Border anchor, BlameEntry blame)
         {
-            try
+            var font = _textView.FormattedLineSource.DefaultTextProperties;
+            var tooltipContent = new Border
             {
-                await LoadTooltipContentAsync(toolTip, blame);
-            }
-            catch (Exception ex)
+                Background = SystemColors.InfoBrush,
+                BorderBrush = SystemColors.ActiveBorderBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(2),
+                Padding = new Thickness(8),
+                MaxWidth = 500,
+                Child = CreateTooltipTextBlock(BlameText.TooltipLoading)
+            };
+            var popup = new Popup
             {
-                Trace.TraceError($"Failed to load Git commit message: {ex}");
-                toolTip.Content = BlameText.TooltipLoadFailed;
+                AllowsTransparency = true,
+                Child = tooltipContent,
+                Placement = PlacementMode.Bottom,
+                PlacementTarget = anchor,
+                StaysOpen = true
+            };
+            var closeTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(250)
+            };
+            bool tooltipContentRequested = false;
+
+            closeTimer.Tick += (_, _) =>
+            {
+                closeTimer.Stop();
+                if (!anchor.IsMouseOver && !tooltipContent.IsMouseOver)
+                    popup.IsOpen = false;
+            };
+            anchor.MouseEnter += (_, _) =>
+            {
+                closeTimer.Stop();
+                popup.IsOpen = true;
+            };
+            anchor.MouseLeave += (_, _) => SchedulePopupClose();
+            tooltipContent.MouseEnter += (_, _) => closeTimer.Stop();
+            tooltipContent.MouseLeave += (_, _) => SchedulePopupClose();
+            anchor.Unloaded += (_, _) =>
+            {
+                closeTimer.Stop();
+                popup.IsOpen = false;
+            };
+            popup.Opened += (_, _) =>
+            {
+                if (tooltipContentRequested)
+                    return;
+
+                tooltipContentRequested = true;
+                _ = LoadTooltipContentAsync(tooltipContent, blame);
+            };
+
+            return popup;
+
+            void SchedulePopupClose()
+            {
+                closeTimer.Stop();
+                closeTimer.Start();
             }
         }
 
-        private async Task LoadTooltipContentAsync(ToolTip toolTip, BlameEntry blame)
+        private TextBlock CreateTooltipTextBlock(string text)
         {
-            string? fullMessage = null;
-            if (!blame.IsUncommitted)
+            var font = _textView.FormattedLineSource.DefaultTextProperties;
+            return new TextBlock
             {
-                string filePath = GetFilePath();
-                string? workingDir = string.IsNullOrEmpty(filePath) ? null : Path.GetDirectoryName(filePath);
+                Text = text,
+                FontFamily = font.Typeface.FontFamily,
+                FontSize = font.FontRenderingEmSize,
+                TextWrapping = TextWrapping.Wrap
+            };
+        }
 
-                fullMessage = workingDir != null
-                    ? await _messageCache.GetOrFetchAsync(workingDir, blame.CommitHash)
-                    : null;
+        private async Task LoadTooltipContentAsync(Border tooltipContent, BlameEntry blame)
+        {
+            try
+            {
+                string? fullMessage = null;
+                if (!blame.IsUncommitted)
+                {
+                    string filePath = GetFilePath();
+                    string? workingDir = string.IsNullOrEmpty(filePath) ? null : Path.GetDirectoryName(filePath);
+
+                    fullMessage = workingDir != null
+                        ? await _messageCache.GetOrFetchAsync(workingDir, blame.CommitHash)
+                        : null;
+                }
+
+                tooltipContent.Child = blame.IsUncommitted
+                    ? CreateTooltipTextBlock(BlameText.FormatTooltip(blame, fullMessage))
+                    : CreateCommitTooltipContent(blame, fullMessage);
             }
-
-            toolTip.Content = blame.IsUncommitted
-                ? BlameText.FormatTooltip(blame, fullMessage)
-                : CreateCommitTooltipContent(blame, fullMessage);
+            catch (Exception error)
+            {
+                Trace.TraceError($"Failed to load Git commit message: {error}");
+                tooltipContent.Child = CreateTooltipTextBlock(BlameText.TooltipLoadFailed);
+            }
         }
 
         private FrameworkElement CreateCommitTooltipContent(BlameEntry blame, string? fullMessage)
