@@ -53,6 +53,10 @@ namespace GitBlameForVs.Adornment
         private CancellationTokenSource? _debounceCts;
         private DateTimeOffset? _lastEditTime;
         private long _updateGeneration = 0;
+        private string? _lastRequestedFilePath;
+        private int _lastRequestedLineNumber = -1;
+        private string? _lastRequestedLineText;
+        private bool _lastRequestedLineIsChanged;
 
         public LineBlameAdornmentManager(IWpfTextView textView)
         {
@@ -74,6 +78,8 @@ namespace GitBlameForVs.Adornment
             _baselineSnapshot = _textView.TextBuffer.CurrentSnapshot;
             _textView.Caret.PositionChanged += OnCaretPositionChanged;
             _textView.LayoutChanged += OnLayoutChanged;
+            _textView.GotAggregateFocus += OnAggregateFocusChanged;
+            _textView.LostAggregateFocus += OnAggregateFocusChanged;
             _textView.TextBuffer.Changed += OnBufferChanged;
             _textView.Closed += OnClosed;
             _document.FileActionOccurred += OnFileActionOccurred;
@@ -94,7 +100,7 @@ namespace GitBlameForVs.Adornment
             {
                 _cache.InvalidateFile(e.FilePath);
                 _baselineSnapshot = _textView.TextBuffer.CurrentSnapshot;
-                RequestUpdate();
+                RequestUpdate(force: true);
             }
         }
 
@@ -108,19 +114,72 @@ namespace GitBlameForVs.Adornment
             RequestUpdate();
         }
 
-        private void OnSettingsChanged(object sender, EventArgs e)
+        private void OnAggregateFocusChanged(object sender, EventArgs e)
         {
             RequestUpdate();
         }
 
-        private void RequestUpdate()
+        private void RequestUpdate(bool force = false)
         {
+            if (_textView.IsClosed || _layer == null)
+                return;
+
+            if (!_textView.HasAggregateFocus)
+            {
+                CancelPendingUpdate();
+                _layer.RemoveAllAdornments();
+                ResetLastRequestedLine();
+                return;
+            }
+
+            var caretPoint = _textView.Caret.Position.BufferPosition;
+            var snapshotLine = caretPoint.GetContainingLine();
+            string filePath = GetFilePath();
+            string lineText = snapshotLine.GetText();
+            bool lineIsChanged = IsLineContentChanged(snapshotLine);
+            if (!force &&
+                string.Equals(_lastRequestedFilePath, filePath, StringComparison.OrdinalIgnoreCase) &&
+                _lastRequestedLineNumber == snapshotLine.LineNumber &&
+                _lastRequestedLineText == lineText &&
+                _lastRequestedLineIsChanged == lineIsChanged)
+            {
+                return;
+            }
+
+            _lastRequestedFilePath = filePath;
+            _lastRequestedLineNumber = snapshotLine.LineNumber;
+            _lastRequestedLineText = lineText;
+            _lastRequestedLineIsChanged = lineIsChanged;
+
+            long generation = CancelPendingUpdate();
+            _layer.RemoveAllAdornments();
+            if (string.IsNullOrWhiteSpace(filePath) ||
+                string.IsNullOrWhiteSpace(lineText) ||
+                lineIsChanged)
+            {
+                return;
+            }
+
             var cancellationSource = new CancellationTokenSource();
-            var previousCancellationSource = _debounceCts;
             _debounceCts = cancellationSource;
-            long generation = Interlocked.Increment(ref _updateGeneration);
-            previousCancellationSource?.Cancel();
             _ = DebouncedUpdateAsync(cancellationSource, generation);
+        }
+
+        private long CancelPendingUpdate()
+        {
+            long generation = Interlocked.Increment(ref _updateGeneration);
+            var cancellationSource = _debounceCts;
+            _debounceCts = null;
+            cancellationSource?.Cancel();
+            return generation;
+        }
+
+        private void ResetLastRequestedLine()
+        {
+            _lastRequestedFilePath = null;
+            _lastRequestedLineNumber = -1;
+            _lastRequestedLineText = null;
+            _lastRequestedLineIsChanged = false;
         }
 
         private async Task DebouncedUpdateAsync(
@@ -159,7 +218,9 @@ namespace GitBlameForVs.Adornment
 
         private async Task UpdateAdornmentAsync(long generation, CancellationToken cancellationToken)
         {
-            _layer?.RemoveAllAdornments();
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!IsLatest(generation) || _textView.IsClosed)
+                return;
 
             var caretPoint = _textView.Caret.Position.BufferPosition;
             var snapshotLine = caretPoint.GetContainingLine();
@@ -167,7 +228,8 @@ namespace GitBlameForVs.Adornment
             var viewLine = _textView.GetTextViewLineContainingBufferPosition(caretPoint);
             if (viewLine == null) return;
 
-            if (IsLineContentChanged(snapshotLine))
+            if (IsLineContentChanged(snapshotLine) ||
+                string.IsNullOrWhiteSpace(snapshotLine.GetText()))
             {
                 return;
             }
@@ -185,7 +247,8 @@ namespace GitBlameForVs.Adornment
             if (currentSnapshotLine.LineNumber != snapshotLine.LineNumber)
                 return;
 
-            if (IsLineContentChanged(currentSnapshotLine))
+            if (IsLineContentChanged(currentSnapshotLine) ||
+                string.IsNullOrWhiteSpace(currentSnapshotLine.GetText()))
                 return;
 
             if (!IsLatest(generation)) return;
@@ -700,16 +763,15 @@ namespace GitBlameForVs.Adornment
         {
             _textView.Caret.PositionChanged -= OnCaretPositionChanged;
             _textView.LayoutChanged -= OnLayoutChanged;
+            _textView.GotAggregateFocus -= OnAggregateFocusChanged;
+            _textView.LostAggregateFocus -= OnAggregateFocusChanged;
             _textView.TextBuffer.Changed -= OnBufferChanged;
             _textView.Closed -= OnClosed;
 
             if (_document != null)
                 _document.FileActionOccurred -= OnFileActionOccurred;
 
-            Interlocked.Increment(ref _updateGeneration);
-            var cancellationSource = _debounceCts;
-            _debounceCts = null;
-            cancellationSource?.Cancel();
+            CancelPendingUpdate();
             _cache.CancelPendingWork();
         }
     }
