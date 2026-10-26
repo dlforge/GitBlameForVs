@@ -448,11 +448,6 @@ namespace GitBlameForVs.Adornment
                 UpdatePopupPosition();
                 popup.IsOpen = true;
             };
-            anchor.MouseMove += (_, _) =>
-            {
-                if (anchor.IsMouseOver)
-                    UpdatePopupPosition();
-            };
             anchor.MouseLeave += (_, _) => SchedulePopupClose();
             tooltipContent.MouseEnter += (_, _) => closeTimer.Stop();
             tooltipContent.MouseLeave += (_, _) => SchedulePopupClose();
