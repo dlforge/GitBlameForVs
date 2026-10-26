@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using System.Threading.Tasks;
 using System.IO;
@@ -57,24 +58,10 @@ public class GitBlameService
     {
         if (string.IsNullOrWhiteSpace(output)) return null;
 
-        var lines = output.Split('\n');
-        var info = new GitBlameInfo
-        {
-            CommitHash = lines[0].Split(' ')[0]
-        };
+        foreach (var blame in ParsePorcelainWholeFile(output).Values)
+            return blame;
 
-        long authorTimeUnix = 0;
-        foreach (var line in lines)
-        {
-            if (line.StartsWith("author "))
-                info.Author = line.Substring("author ".Length).Trim();
-            else if (line.StartsWith("author-time "))
-                long.TryParse(line.Substring("author-time ".Length).Trim(), out authorTimeUnix);
-            else if (line.StartsWith("summary "))
-                info.Summary = line.Substring("summary ".Length).Trim();
-        }
-        info.AuthorTime = DateTimeOffset.FromUnixTimeSeconds(authorTimeUnix);
-        return info;
+        return null;
     }
 
     /// <summary>
@@ -156,59 +143,188 @@ public class GitBlameService
         var result = new Dictionary<int, GitBlameInfo>();
         if (string.IsNullOrWhiteSpace(output)) return result;
 
-        // 同一个 commit 的 metadata 只在第一次出现时输出，
-        // 用这个字典按 hash 复用已经解析过的 GitBlameInfo
+        // Git omits repeated commit metadata in porcelain output.
         var commitCache = new Dictionary<string, GitBlameInfo>();
-
         var lines = output.Split('\n');
-        int i = 0;
+        GitBlameInfo? currentBlame = null;
 
-        while (i < lines.Length)
+        foreach (var rawLine in lines)
         {
-            var line = lines[i];
-            if (line.Length == 0) { i++; continue; }
-
-            var parts = line.Split(' ');
-            // header 行格式: <40位hash> <原始行号> <最终行号> [<本组行数，仅首次出现时有>]
-            bool isHeaderLine = parts.Length >= 3
-                && parts[0].Length == 40
-                && int.TryParse(parts[2], out int finalLine);
-
-            if (!isHeaderLine) { i++; continue; }
-
-            string hash = parts[0];
-            finalLine = int.Parse(parts[2]);
-
-            if (!commitCache.TryGetValue(hash, out var info))
+            var line = rawLine.TrimEnd('\r');
+            if (TryParseHeader(line, out var commitHash, out var originalLineNumber, out var finalLineNumber, out var groupLineCount))
             {
-                info = new GitBlameInfo { CommitHash = hash };
-                commitCache[hash] = info;
-            }
+                CompleteBlame(currentBlame, result, commitCache);
 
-            i++;
-
-            // 逐行读取 metadata，直到遇到以 \t 开头的内容行为止
-            // （如果是已见过的 commit，这里会立即遇到 \t，不会进入循环体，等价于跳过）
-            while (i < lines.Length && !lines[i].StartsWith("\t"))
-            {
-                var metaLine = lines[i];
-                if (metaLine.StartsWith("author "))
-                    info.Author = metaLine.Substring("author ".Length).Trim();
-                else if (metaLine.StartsWith("author-time "))
+                currentBlame = new GitBlameInfo
                 {
-                    if (long.TryParse(metaLine.Substring("author-time ".Length).Trim(), out long unix))
-                        info.AuthorTime = DateTimeOffset.FromUnixTimeSeconds(unix);
-                }
-                else if (metaLine.StartsWith("summary "))
-                    info.Summary = metaLine.Substring("summary ".Length).Trim();
-                i++;
+                    CommitHash = commitHash,
+                    OriginalLineNumber = originalLineNumber,
+                    FinalLineNumber = finalLineNumber,
+                    GroupLineCount = groupLineCount
+                };
+
+                if (commitCache.TryGetValue(commitHash, out var cachedMetadata))
+                    CopyCommitMetadata(cachedMetadata, currentBlame);
+
+                continue;
             }
 
-            if (i < lines.Length) i++; // 跳过内容行（\t 开头那行）
+            if (currentBlame == null)
+                continue;
 
-            result[finalLine] = info;
+            if (line.StartsWith("\t", StringComparison.Ordinal))
+            {
+                currentBlame.LineContent = line.Substring(1);
+                CompleteBlame(currentBlame, result, commitCache);
+                currentBlame = null;
+                continue;
+            }
+
+            ParseMetadata(currentBlame, line);
         }
 
+        CompleteBlame(currentBlame, result, commitCache);
         return result;
+    }
+
+    private static bool TryParseHeader(
+        string line,
+        out string commitHash,
+        out int originalLineNumber,
+        out int finalLineNumber,
+        out int? groupLineCount)
+    {
+        commitHash = string.Empty;
+        originalLineNumber = 0;
+        finalLineNumber = 0;
+        groupLineCount = null;
+
+        var parts = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        if ((parts.Length != 3 && parts.Length != 4) ||
+            !IsObjectId(parts[0]) ||
+            !int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out originalLineNumber) ||
+            !int.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out finalLineNumber))
+        {
+            return false;
+        }
+
+        if (parts.Length == 4)
+        {
+            if (!int.TryParse(parts[3], NumberStyles.None, CultureInfo.InvariantCulture, out var parsedGroupLineCount))
+                return false;
+
+            groupLineCount = parsedGroupLineCount;
+        }
+
+        commitHash = parts[0];
+        return true;
+    }
+
+    private static bool IsObjectId(string value)
+    {
+        if (value.Length != 40 && value.Length != 64)
+            return false;
+
+        foreach (char character in value)
+        {
+            if (!((character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f') ||
+                  (character >= 'A' && character <= 'F')))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void ParseMetadata(GitBlameInfo blame, string line)
+    {
+        if (line.StartsWith("author ", StringComparison.Ordinal))
+            blame.Author = line.Substring("author ".Length);
+        else if (line.StartsWith("author-mail ", StringComparison.Ordinal))
+            blame.AuthorMail = line.Substring("author-mail ".Length);
+        else if (line.StartsWith("author-time ", StringComparison.Ordinal))
+            blame.AuthorTime = ParseUnixTime(line.Substring("author-time ".Length)) ?? blame.AuthorTime;
+        else if (line.StartsWith("author-tz ", StringComparison.Ordinal))
+            blame.AuthorTimeZone = line.Substring("author-tz ".Length);
+        else if (line.StartsWith("committer ", StringComparison.Ordinal))
+            blame.Committer = line.Substring("committer ".Length);
+        else if (line.StartsWith("committer-mail ", StringComparison.Ordinal))
+            blame.CommitterMail = line.Substring("committer-mail ".Length);
+        else if (line.StartsWith("committer-time ", StringComparison.Ordinal))
+            blame.CommitterTime = ParseUnixTime(line.Substring("committer-time ".Length));
+        else if (line.StartsWith("committer-tz ", StringComparison.Ordinal))
+            blame.CommitterTimeZone = line.Substring("committer-tz ".Length);
+        else if (line.StartsWith("summary ", StringComparison.Ordinal))
+            blame.Summary = line.Substring("summary ".Length);
+        else if (line.StartsWith("previous ", StringComparison.Ordinal))
+            ParsePrevious(blame, line.Substring("previous ".Length));
+        else if (line.StartsWith("filename ", StringComparison.Ordinal))
+            blame.FileName = line.Substring("filename ".Length);
+        else if (line == "boundary")
+            blame.IsBoundary = true;
+    }
+
+    private static DateTimeOffset? ParseUnixTime(string value)
+    {
+        if (!long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var unixTime))
+            return null;
+
+        try
+        {
+            return DateTimeOffset.FromUnixTimeSeconds(unixTime);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    private static void ParsePrevious(GitBlameInfo blame, string value)
+    {
+        var separatorIndex = value.IndexOf(' ');
+        if (separatorIndex <= 0)
+            return;
+
+        var previousCommitHash = value.Substring(0, separatorIndex);
+        if (!IsObjectId(previousCommitHash))
+            return;
+
+        blame.PreviousCommitHash = previousCommitHash;
+        blame.PreviousFileName = value.Substring(separatorIndex + 1);
+    }
+
+    private static void CompleteBlame(
+        GitBlameInfo? blame,
+        Dictionary<int, GitBlameInfo> result,
+        Dictionary<string, GitBlameInfo> commitCache)
+    {
+        if (blame == null || blame.CommitHash == null)
+            return;
+
+        if (commitCache.TryGetValue(blame.CommitHash, out var cachedMetadata))
+            CopyCommitMetadata(cachedMetadata, blame);
+        else
+            commitCache[blame.CommitHash] = blame;
+
+        result[blame.FinalLineNumber] = blame;
+    }
+
+    private static void CopyCommitMetadata(GitBlameInfo source, GitBlameInfo destination)
+    {
+        destination.Author = source.Author;
+        destination.AuthorMail = source.AuthorMail;
+        destination.AuthorTime = source.AuthorTime;
+        destination.AuthorTimeZone = source.AuthorTimeZone;
+        destination.Committer = source.Committer;
+        destination.CommitterMail = source.CommitterMail;
+        destination.CommitterTime = source.CommitterTime;
+        destination.CommitterTimeZone = source.CommitterTimeZone;
+        destination.Summary = source.Summary;
+        destination.PreviousCommitHash = source.PreviousCommitHash;
+        destination.PreviousFileName = source.PreviousFileName;
+        destination.FileName = source.FileName;
+        destination.IsBoundary = source.IsBoundary;
     }
 }
