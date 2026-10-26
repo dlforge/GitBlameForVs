@@ -7,6 +7,7 @@ using Microsoft.VisualStudio.Text.Formatting;
 using System;
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
@@ -14,7 +15,9 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
 using System.Windows.Threading;
 using Ellipse = System.Windows.Shapes.Ellipse;
 using WpfPath = System.Windows.Shapes.Path;
@@ -39,6 +42,34 @@ namespace GitBlameForVs.Adornment
             Color.FromRgb(0x5D, 0x83, 0xA1),
             Color.FromRgb(0x9A, 0x7C, 0x4F)
         };
+
+        private enum AccentState
+        {
+            Disabled = 0,
+            EnableAcrylicBlurBehind = 4
+        }
+
+        private enum WindowCompositionAttribute
+        {
+            AccentPolicy = 19
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct AccentPolicy
+        {
+            public AccentState State;
+            public uint Flags;
+            public uint GradientColor;
+            public uint AnimationId;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WindowCompositionAttributeData
+        {
+            public WindowCompositionAttribute Attribute;
+            public IntPtr Data;
+            public int SizeOfData;
+        }
 
         private readonly IWpfTextView _textView;
         private readonly IAdornmentLayer? _layer;
@@ -142,6 +173,11 @@ namespace GitBlameForVs.Adornment
             mutedForeground.Opacity *= 0.7;
             return mutedForeground;
         }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int SetWindowCompositionAttribute(
+            IntPtr windowHandle,
+            ref WindowCompositionAttributeData data);
 
         private Brush CreateHoverBackgroundBrush()
         {
@@ -343,13 +379,19 @@ namespace GitBlameForVs.Adornment
             var tooltipContent = new Border
             {
                 BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(2),
+                CornerRadius = new CornerRadius(8),
                 Padding = new Thickness(8),
                 MaxWidth = 500,
-                Child = CreateTooltipTextBlock(BlameText.TooltipLoading)
+                Child = CreateTooltipTextBlock(BlameText.TooltipLoading),
+                Effect = new DropShadowEffect
+                {
+                    Color = Color.FromArgb(0x50, 0, 0, 0),
+                    BlurRadius = 16,
+                    ShadowDepth = 2,
+                    Opacity = 0.55
+                }
             };
-            tooltipContent.SetResourceReference(
-                Border.BackgroundProperty, EnvironmentColors.ToolWindowBackgroundBrushKey);
+            tooltipContent.Background = Brushes.Transparent;
             tooltipContent.SetResourceReference(
                 Border.BorderBrushProperty, EnvironmentColors.ToolWindowBorderBrushKey);
             tooltipContent.SetResourceReference(
@@ -370,6 +412,8 @@ namespace GitBlameForVs.Adornment
                 Interval = TimeSpan.FromMilliseconds(250)
             };
             bool tooltipContentRequested = false;
+            bool themeChangedSubscribed = false;
+            ThemeChangedEventHandler themeChangedHandler = _ => ApplyPopupAcrylic(popup, tooltipContent);
 
             closeTimer.Tick += (_, _) =>
             {
@@ -398,11 +442,26 @@ namespace GitBlameForVs.Adornment
             };
             popup.Opened += (_, _) =>
             {
+                ApplyPopupAcrylic(popup, tooltipContent);
+                if (!themeChangedSubscribed)
+                {
+                    VSColorTheme.ThemeChanged += themeChangedHandler;
+                    themeChangedSubscribed = true;
+                }
+
                 if (tooltipContentRequested)
                     return;
 
                 tooltipContentRequested = true;
                 _ = LoadTooltipContentAsync(tooltipContent, blame, loadCommitMessage);
+            };
+            popup.Closed += (_, _) =>
+            {
+                if (!themeChangedSubscribed)
+                    return;
+
+                VSColorTheme.ThemeChanged -= themeChangedHandler;
+                themeChangedSubscribed = false;
             };
 
             return popup;
@@ -418,6 +477,63 @@ namespace GitBlameForVs.Adornment
                 var pointerPosition = Mouse.GetPosition(anchor);
                 popup.PlacementRectangle = new Rect(pointerPosition, new Size(0, 0));
             }
+        }
+
+        private static void ApplyPopupAcrylic(Popup popup, Border tooltipContent)
+        {
+            try
+            {
+                if (popup.Child is not Visual popupVisual ||
+                    PresentationSource.FromVisual(popupVisual) is not HwndSource source)
+                {
+                    SetFallbackTooltipBackground(tooltipContent);
+                    return;
+                }
+
+                var themeColor = VSColorTheme.GetThemedColor(
+                    EnvironmentColors.ToolWindowBackgroundColorKey);
+                var accentPolicy = new AccentPolicy
+                {
+                    State = AccentState.EnableAcrylicBlurBehind,
+                    GradientColor = (0xC8U << 24) |
+                        ((uint)themeColor.B << 16) |
+                        ((uint)themeColor.G << 8) |
+                        themeColor.R
+                };
+                int accentPolicySize = Marshal.SizeOf(typeof(AccentPolicy));
+                IntPtr accentPolicyPointer = Marshal.AllocHGlobal(accentPolicySize);
+                try
+                {
+                    Marshal.StructureToPtr(accentPolicy, accentPolicyPointer, false);
+                    var compositionData = new WindowCompositionAttributeData
+                    {
+                        Attribute = WindowCompositionAttribute.AccentPolicy,
+                        Data = accentPolicyPointer,
+                        SizeOfData = accentPolicySize
+                    };
+                    if (SetWindowCompositionAttribute(source.Handle, ref compositionData) != 0)
+                    {
+                        tooltipContent.Background = Brushes.Transparent;
+                        return;
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(accentPolicyPointer);
+                }
+            }
+            catch (Exception error)
+            {
+                Trace.TraceInformation($"Acrylic blame popup is unavailable: {error.Message}");
+            }
+
+            SetFallbackTooltipBackground(tooltipContent);
+        }
+
+        private static void SetFallbackTooltipBackground(Border tooltipContent)
+        {
+            tooltipContent.SetResourceReference(
+                Border.BackgroundProperty, EnvironmentColors.ToolWindowBackgroundBrushKey);
         }
 
         private TextBlock CreateTooltipTextBlock(string text)
@@ -546,17 +662,30 @@ namespace GitBlameForVs.Adornment
                 VerticalAlignment = VerticalAlignment.Center
             };
             hashControls.Children.Add(shortHash);
+            Border? copyFeedback = null;
             if (!string.IsNullOrWhiteSpace(commitHash))
             {
-                var copyFeedback = new TextBlock
+                copyFeedback = new Border
                 {
-                    Foreground = mutedForeground,
-                    FontFamily = font.Typeface.FontFamily,
-                    FontSize = font.FontRenderingEmSize,
-                    Margin = new Thickness(4, 0, 0, 0),
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Visibility = Visibility.Collapsed
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(4),
+                    Padding = new Thickness(6, 2, 6, 2),
+                    Margin = new Thickness(0, 6, 0, 0),
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    Visibility = Visibility.Collapsed,
+                    Child = new TextBlock
+                    {
+                        Text = BlameText.CopyShaText,
+                        FontFamily = font.Typeface.FontFamily,
+                        FontSize = font.FontRenderingEmSize,
+                        FontWeight = FontWeights.SemiBold
+                    }
                 };
+                copyFeedback.SetResourceReference(
+                    Border.BorderBrushProperty, EnvironmentColors.AccentBorderBrushKey);
+                ((TextBlock)copyFeedback.Child).SetResourceReference(
+                    TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+
                 var copyButton = new Button
                 {
                     Content = CreateCopyIcon(mutedForeground),
@@ -576,11 +705,9 @@ namespace GitBlameForVs.Adornment
                     if (!TryCopyCommitHashToClipboard(commitHash))
                         return;
 
-                    copyFeedback.Text = BlameText.CopyShaText;
                     copyFeedback.Visibility = Visibility.Visible;
                 };
                 hashControls.Children.Add(copyButton);
-                hashControls.Children.Add(copyFeedback);
             }
 
             DockPanel.SetDock(hashControls, Dock.Right);
@@ -593,6 +720,8 @@ namespace GitBlameForVs.Adornment
                 FontSize = font.FontRenderingEmSize
             });
             content.Children.Add(footer);
+            if (copyFeedback != null)
+                content.Children.Add(copyFeedback);
 
             return content;
         }
