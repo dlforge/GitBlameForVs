@@ -16,6 +16,12 @@ namespace GitBlameForVs.Localization
         /// <summary>Tooltip 加载失败时的文案。</summary>
         string TooltipLoadFailed { get; }
 
+        /// <summary>行内 blame 查询超时时的文案。</summary>
+        string BlameTimedOut { get; }
+
+        /// <summary>行内 blame 查询失败时的文案。</summary>
+        string BlameFailed { get; }
+
         /// <summary>复制 commit hash 成功的反馈文案。</summary>
         string CopyHashFeedback { get; }
 
