@@ -6,9 +6,10 @@ using System.Text;
 using System.Threading.Tasks;
 using System.IO;
 using System.Threading;
+using GitBlameForVs.GitBlame;
 
-namespace GitBlameForVs.GitBlame;
-public class GitBlameService
+namespace GitBlameForVs;
+public class Git
 {
     private static readonly TimeSpan SingleLineBlameTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan WholeFileBlameTimeout = TimeSpan.FromSeconds(15);
@@ -22,7 +23,7 @@ public class GitBlameService
     /// <returns>返回对应行的 GitBlameInfo；文件不可 blame 时返回 null</returns>
     /// <exception cref="GitCommandException">Git 返回未预期的错误</exception>
     /// <exception cref="TimeoutException">Git 命令超过超时时间</exception>
-    public static async Task<GitBlameInfo?> GetBlameAsync(
+    public static async Task<BlameInfo?> GetBlameAsync(
         string filePath,
         int lineNumber1Based,
         CancellationToken cancellationToken = default)
@@ -53,7 +54,7 @@ public class GitBlameService
     /// </summary>
     /// <param name="output">git blame --porcelain 输出内容</param>
     /// <returns>返回解析后的 GitBlameInfo，如果解析失败则返回 null</returns>
-    private static GitBlameInfo? ParsePorcelain(string output)
+    private static BlameInfo? ParsePorcelain(string output)
     {
         if (string.IsNullOrWhiteSpace(output)) return null;
 
@@ -94,7 +95,7 @@ public class GitBlameService
     /// </summary>
     /// <param name="filePath">文件路径</param>
     /// <returns></returns>
-    public static async Task<Dictionary<int, GitBlameInfo>?> GetBlameForWholeFileAsync(
+    public static async Task<Dictionary<int, BlameInfo>?> GetBlameForWholeFileAsync(
         string filePath,
         CancellationToken cancellationToken = default)
     {
@@ -111,7 +112,7 @@ public class GitBlameService
         if (result.ExitCode != 0)
         {
             if (IsExpectedNoBlameFailure(result.StandardError))
-                return new Dictionary<int, GitBlameInfo>();
+                return new Dictionary<int, BlameInfo>();
 
             throw new GitCommandException("git blame", result.ExitCode, result.StandardError);
         }
@@ -250,15 +251,15 @@ public class GitBlameService
         public int ExitCode { get; }
     }
 
-    private static Dictionary<int, GitBlameInfo> ParsePorcelainWholeFile(string output)
+    private static Dictionary<int, BlameInfo> ParsePorcelainWholeFile(string output)
     {
-        var result = new Dictionary<int, GitBlameInfo>();
+        var result = new Dictionary<int, BlameInfo>();
         if (string.IsNullOrWhiteSpace(output)) return result;
 
         // Git omits repeated commit metadata in porcelain output.
-        var commitCache = new Dictionary<string, GitBlameInfo>();
+        var commitCache = new Dictionary<string, BlameInfo>();
         var lines = output.Split('\n');
-        GitBlameInfo? currentBlame = null;
+        BlameInfo? currentBlame = null;
 
         foreach (var rawLine in lines)
         {
@@ -267,7 +268,7 @@ public class GitBlameService
             {
                 CompleteBlame(currentBlame, result, commitCache);
 
-                currentBlame = new GitBlameInfo
+                currentBlame = new BlameInfo
                 {
                     CommitHash = commitHash,
                     OriginalLineNumber = originalLineNumber,
@@ -350,7 +351,7 @@ public class GitBlameService
         return true;
     }
 
-    private static void ParseMetadata(GitBlameInfo blame, string line)
+    private static void ParseMetadata(BlameInfo blame, string line)
     {
         if (line.StartsWith("author ", StringComparison.Ordinal))
             blame.Author = line.Substring("author ".Length);
@@ -393,7 +394,7 @@ public class GitBlameService
         }
     }
 
-    private static void ParsePrevious(GitBlameInfo blame, string value)
+    private static void ParsePrevious(BlameInfo blame, string value)
     {
         var separatorIndex = value.IndexOf(' ');
         if (separatorIndex <= 0)
@@ -408,9 +409,9 @@ public class GitBlameService
     }
 
     private static void CompleteBlame(
-        GitBlameInfo? blame,
-        Dictionary<int, GitBlameInfo> result,
-        Dictionary<string, GitBlameInfo> commitCache)
+        BlameInfo? blame,
+        Dictionary<int, BlameInfo> result,
+        Dictionary<string, BlameInfo> commitCache)
     {
         if (blame == null || blame.CommitHash == null)
             return;
@@ -423,7 +424,7 @@ public class GitBlameService
         result[blame.FinalLineNumber] = blame;
     }
 
-    private static void CopyCommitMetadata(GitBlameInfo source, GitBlameInfo destination)
+    private static void CopyCommitMetadata(BlameInfo source, BlameInfo destination)
     {
         destination.Author = source.Author;
         destination.AuthorMail = source.AuthorMail;

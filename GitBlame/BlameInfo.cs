@@ -6,7 +6,7 @@ namespace GitBlameForVs.GitBlame
     /// Git blame porcelain 输出中单行记录的完整数据模型。
     /// 文案格式化统一由 Localization 层的 IBlameTextProvider 负责。
     /// </summary>
-    public class GitBlameInfo
+    public class BlameInfo
     {
         /// <summary>
         /// SHA-1 仓库中表示未提交更改的提交哈希值。

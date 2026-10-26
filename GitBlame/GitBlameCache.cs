@@ -11,7 +11,7 @@ namespace GitBlameForVs.GitBlame
     public class GitBlameCache
     {
         // 按文件路径存放"整份文件的行号 -> blame 信息"映射
-        private readonly ConcurrentDictionary<string, Dictionary<int, GitBlameInfo>> _fileCache = new();
+        private readonly ConcurrentDictionary<string, Dictionary<int, BlameInfo>> _fileCache = new();
 
         private readonly Dictionary<string, Task<PrefetchResult>> _prefetchTasks = new();
         private readonly object _prefetchTasksLock = new();
@@ -23,7 +23,7 @@ namespace GitBlameForVs.GitBlame
         /// <param name="filePath"></param>
         /// <param name="line"></param>
         /// <returns></returns>
-        public async Task<GitBlameInfo?> GetOrFetchAsync(
+        public async Task<BlameInfo?> GetOrFetchAsync(
             string filePath,
             int line,
             CancellationToken cancellationToken = default)
@@ -61,7 +61,7 @@ namespace GitBlameForVs.GitBlame
                     : null;
             }
 
-            return await GitBlameService.GetBlameAsync(filePath, line, cancellationToken)
+            return await Git.GetBlameAsync(filePath, line, cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -82,7 +82,7 @@ namespace GitBlameForVs.GitBlame
         {
             try
             {
-                var blameByLine = await GitBlameService.GetBlameForWholeFileAsync(
+                var blameByLine = await Git.GetBlameForWholeFileAsync(
                     filePath,
                     _lifetimeCancellationSource.Token);
                 return new PrefetchResult(blameByLine, null);
@@ -124,13 +124,13 @@ namespace GitBlameForVs.GitBlame
 
         private sealed class PrefetchResult
         {
-            public PrefetchResult(Dictionary<int, GitBlameInfo>? blameByLine, Exception? error)
+            public PrefetchResult(Dictionary<int, BlameInfo>? blameByLine, Exception? error)
             {
                 BlameByLine = blameByLine;
                 Error = error;
             }
 
-            public Dictionary<int, GitBlameInfo>? BlameByLine { get; }
+            public Dictionary<int, BlameInfo>? BlameByLine { get; }
             public Exception? Error { get; }
         }
 

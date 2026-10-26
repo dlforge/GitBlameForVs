@@ -24,7 +24,7 @@ namespace GitBlameForVs.Localization
             return $"{(int)(span.TotalDays / 365)} 年前";
         }
 
-        public string FormatInline(GitBlameInfo blame, DateTimeOffset? lastEditTime)
+        public string FormatInline(BlameInfo blame, DateTimeOffset? lastEditTime)
         {
             if (blame.IsUncommitted)
             {
@@ -34,7 +34,7 @@ namespace GitBlameForVs.Localization
             return $"{blame.Author}, {FormatRelativeTime(blame.AuthorTime)} • {blame.Summary}";
         }
 
-        public string FormatTooltip(GitBlameInfo blame, string? fullMessage)
+        public string FormatTooltip(BlameInfo blame, string? fullMessage)
         {
             if (blame.IsUncommitted) return "未提交的更改";
 

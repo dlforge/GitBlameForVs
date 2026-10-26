@@ -21,7 +21,7 @@ namespace GitBlameForVs.GitBlame
             if (_cache.TryGetValue(commitHash, out var cached))
                 return cached;
 
-            var message = await GitBlameService.GetFullCommitMessageAsync(workingDir, commitHash);
+            var message = await Git.GetFullCommitMessageAsync(workingDir, commitHash);
             _cache[commitHash] = message; // 即使为 null 也缓存，避免重复失败调用
             return message;
         }
