@@ -10,8 +10,6 @@ namespace GitBlameForVs.Localization
         public string TooltipLoadFailed => "Failed to load commit info";
         public string BlameTimedOut => "Git blame timed out";
         public string BlameFailed => "Git blame failed";
-        public string CopyHashFeedback => "Copied hash";
-        public string CopySuccessPrefix => "  ✓ ";
 
         public string FormatRelativeTime(DateTimeOffset time)
         {
@@ -31,8 +29,12 @@ namespace GitBlameForVs.Localization
                 var when = FormatRelativeTime(lastEditTime ?? DateTimeOffset.Now);
                 return $"You, {when} · Uncommitted changes";
             }
-            return $"{blame.Author}, {FormatRelativeTime(blame.AuthorTime)} • {blame.Summary}";
+            var summary = string.IsNullOrWhiteSpace(blame.Summary) ? string.Empty : $" - {blame.Summary}";
+            return $"{blame.Author}, {FormatRelativeTime(blame.AuthorTime)}{summary}";
         }
+
+        public string FormatAbsoluteTime(DateTimeOffset time) =>
+            time.ToLocalTime().ToString("MMM d, yyyy h:mm tt");
 
         public string FormatTooltip(BlameEntry blame, string? fullMessage)
         {

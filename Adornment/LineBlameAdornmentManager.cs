@@ -12,13 +12,15 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Threading;
+using Ellipse = System.Windows.Shapes.Ellipse;
+using WpfPath = System.Windows.Shapes.Path;
 
 namespace GitBlameForVs.Adornment
 {
     internal sealed class LineBlameAdornmentManager
     {
         public const string LayerName = "GitBlameForVsBlameLayer";
+        private const double InlineBlameHorizontalGap = 8;
         private readonly IWpfTextView _textView;
         private readonly IAdornmentLayer? _layer;
         private readonly GitBlameCache _cache = new();
@@ -243,18 +245,28 @@ namespace GitBlameForVs.Adornment
 
         private void RenderAdornment(ITextViewLine line, BlameEntry blame)
         {
-            string text = BlameText.Current.FormatInline(blame, _lastEditTime);
-            Cursor cursor = blame.IsUncommitted ? Cursors.Arrow : Cursors.Hand;
-            var normalBrush = new SolidColorBrush(Colors.Gray);
+            var foreground = CreateMutedForegroundBrush();
             var textBlock = new TextBlock
             {
-                Text = text,
-                Foreground = normalBrush,
+                Text = BlameText.Current.FormatInline(blame, _lastEditTime),
+                Foreground = foreground,
                 FontSize = _textView.FormattedLineSource.DefaultTextProperties.FontRenderingEmSize,
-                Cursor = cursor,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                TextWrapping = TextWrapping.NoWrap,
+                Cursor = Cursors.Arrow,
                 Background = Brushes.Transparent,
                 FontFamily = _textView.FormattedLineSource.DefaultTextProperties.Typeface.FontFamily
             };
+            var blameIcon = CreateBlameIcon(foreground);
+            var inlineBlame = new DockPanel
+            {
+                LastChildFill = true,
+                VerticalAlignment = VerticalAlignment.Center,
+                Cursor = Cursors.Arrow
+            };
+            DockPanel.SetDock(blameIcon, Dock.Left);
+            inlineBlame.Children.Add(blameIcon);
+            inlineBlame.Children.Add(textBlock);
 
             var toolTip = new ToolTip
             {
@@ -263,33 +275,78 @@ namespace GitBlameForVs.Adornment
                 FontSize = _textView.FormattedLineSource.DefaultTextProperties.FontRenderingEmSize,
                 BorderThickness = new Thickness(1),
             };
-            textBlock.ToolTip = toolTip;
+            inlineBlame.ToolTip = toolTip;
             toolTip.Opened += (s, e) => _ = OnToolTipOpenedAsync(toolTip, blame);
 
-            if (!blame.IsUncommitted)
-            {
-                textBlock.MouseLeftButtonDown += (s, e) => OnBlameLeftClick(textBlock, blame);
-            }
-
-            AddAdornment(line, textBlock);
+            AddAdornment(line, inlineBlame);
         }
 
-        private void AddAdornment(ITextViewLine line, TextBlock textBlock)
+        private Brush CreateMutedForegroundBrush()
+        {
+            var foreground = _textView.FormattedLineSource.DefaultTextProperties.ForegroundBrush;
+            var mutedForeground = (Brush)foreground.CloneCurrentValue();
+            mutedForeground.Opacity *= 0.7;
+            return mutedForeground;
+        }
+
+        private static Canvas CreateBlameIcon(Brush foreground)
+        {
+            var icon = new Canvas
+            {
+                Width = 12,
+                Height = 12,
+                Margin = new Thickness(0, 0, 6, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                IsHitTestVisible = false
+            };
+            icon.Children.Add(new WpfPath
+            {
+                Data = Geometry.Parse("M 3,2 L 3,10 M 3,4 C 3,4 9,4 9,8"),
+                Stroke = foreground,
+                StrokeThickness = 1.25,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round
+            });
+            AddBlameIconNode(icon, 1.5, 0.5, foreground);
+            AddBlameIconNode(icon, 1.5, 8.5, foreground);
+            AddBlameIconNode(icon, 7.5, 6.5, foreground);
+            return icon;
+        }
+
+        private static void AddBlameIconNode(Canvas icon, double left, double top, Brush foreground)
+        {
+            var node = new Ellipse
+            {
+                Width = 3,
+                Height = 3,
+                Fill = foreground,
+                IsHitTestVisible = false
+            };
+            Canvas.SetLeft(node, left);
+            Canvas.SetTop(node, top);
+            icon.Children.Add(node);
+        }
+
+        private void AddAdornment(ITextViewLine line, FrameworkElement adornment)
         {
             var layer = _layer;
             if (layer == null)
                 return;
 
-            textBlock.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            double startX = Math.Max(line.TextRight, _textView.Caret.Left) + InlineBlameHorizontalGap;
+            double availableWidth = _textView.ViewportWidth - startX - InlineBlameHorizontalGap;
+            if (availableWidth <= 0)
+                return;
 
-            double startX = Math.Max(line.TextRight, _textView.Caret.Left);
-            Canvas.SetLeft(textBlock, startX + 60);
-            Canvas.SetTop(textBlock, line.TextTop);
+            adornment.MaxWidth = Math.Min(adornment.MaxWidth, availableWidth);
+            adornment.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            Canvas.SetLeft(adornment, startX);
+            Canvas.SetTop(adornment, line.TextTop);
             layer.AddAdornment(
                 AdornmentPositioningBehavior.TextRelative,
                 new SnapshotSpan(line.Start, line.End),
                 tag: null,
-                adornment: textBlock,
+                adornment: adornment,
                 removedCallback: null);
         }
 
@@ -319,39 +376,106 @@ namespace GitBlameForVs.Adornment
                     : null;
             }
 
-            toolTip.Content = BlameText.Current.FormatTooltip(blame, fullMessage);
+            toolTip.Content = blame.IsUncommitted
+                ? BlameText.Current.FormatTooltip(blame, fullMessage)
+                : CreateCommitTooltipContent(blame, fullMessage);
         }
 
-        private void OnBlameLeftClick(TextBlock textBlock, BlameEntry blame)
+        private FrameworkElement CreateCommitTooltipContent(BlameEntry blame, string? fullMessage)
         {
-            CopyToClipboardWithFeedback(textBlock, blame.CommitHash!, BlameText.Current.CopyHashFeedback);
-        }
-
-        private void CopyToClipboardWithFeedback(TextBlock textBlock, string content, string feedbackText)
-        {
-            try
+            var font = _textView.FormattedLineSource.DefaultTextProperties;
+            var mutedForeground = CreateMutedForegroundBrush();
+            var content = new StackPanel
             {
-                Clipboard.SetText(content);
-            }
-            catch
-            {
-                return;
-            }
-
-            string originalText = textBlock.Text;
-            var originalBrush = textBlock.Foreground;
-
-            textBlock.Text = BlameText.Current.CopySuccessPrefix + feedbackText;
-            textBlock.Foreground = Brushes.LimeGreen;
-
-            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1200) };
-            timer.Tick += (s, e) =>
-            {
-                timer.Stop();
-                textBlock.Text = originalText;
-                textBlock.Foreground = originalBrush;
+                MaxWidth = 480,
+                Margin = new Thickness(2)
             };
-            timer.Start();
+
+            var authorHeader = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 0, 0, 6)
+            };
+            authorHeader.Children.Add(new TextBlock
+            {
+                Text = string.IsNullOrWhiteSpace(blame.Author) ? "-" : blame.Author,
+                FontFamily = font.Typeface.FontFamily,
+                FontSize = font.FontRenderingEmSize,
+                FontWeight = FontWeights.SemiBold
+            });
+
+            var authorMail = blame.AuthorMail;
+            if (!string.IsNullOrWhiteSpace(authorMail))
+            {
+                authorHeader.Children.Add(new TextBlock
+                {
+                    Text = $"  {authorMail?.Trim('<', '>')}",
+                    Foreground = mutedForeground,
+                    FontFamily = font.Typeface.FontFamily,
+                    FontSize = font.FontRenderingEmSize
+                });
+            }
+
+            content.Children.Add(authorHeader);
+            content.Children.Add(new Border
+            {
+                Height = 1,
+                Background = mutedForeground,
+                Margin = new Thickness(0, 0, 0, 6)
+            });
+
+            var commitMessage = !string.IsNullOrWhiteSpace(fullMessage)
+                ? fullMessage
+                : !string.IsNullOrWhiteSpace(blame.Summary)
+                    ? blame.Summary
+                    : BlameText.Current.FormatTooltip(blame, fullMessage);
+            content.Children.Add(new ScrollViewer
+            {
+                Content = new TextBlock
+                {
+                    Text = commitMessage,
+                    FontFamily = font.Typeface.FontFamily,
+                    FontSize = font.FontRenderingEmSize,
+                    TextWrapping = TextWrapping.Wrap
+                },
+                MaxHeight = 240,
+                MaxWidth = 480,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+            });
+
+            content.Children.Add(new Border
+            {
+                Height = 1,
+                Background = mutedForeground,
+                Margin = new Thickness(0, 6, 0, 4)
+            });
+
+            var footer = new DockPanel();
+            var commitHash = blame.CommitHash ?? string.Empty;
+            var shortCommitHash = commitHash.Length > 8
+                ? commitHash.Substring(0, 8)
+                : commitHash;
+            var shortHash = new TextBlock
+            {
+                Text = shortCommitHash,
+                Foreground = mutedForeground,
+                Cursor = Cursors.Arrow,
+                FontFamily = font.Typeface.FontFamily,
+                FontSize = font.FontRenderingEmSize
+            };
+            DockPanel.SetDock(shortHash, Dock.Right);
+            footer.Children.Add(shortHash);
+            footer.Children.Add(new TextBlock
+            {
+                Text = BlameText.Current.FormatAbsoluteTime(blame.CommitterTime ?? blame.AuthorTime),
+                Foreground = mutedForeground,
+                FontFamily = font.Typeface.FontFamily,
+                FontSize = font.FontRenderingEmSize
+            });
+            content.Children.Add(footer);
+
+            return content;
         }
 
         private string GetFilePath()

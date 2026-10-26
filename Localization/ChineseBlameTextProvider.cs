@@ -10,8 +10,6 @@ namespace GitBlameForVs.Localization
         public string TooltipLoadFailed => "加载提交信息失败";
         public string BlameTimedOut => "Git blame 查询超时";
         public string BlameFailed => "Git blame 查询失败";
-        public string CopyHashFeedback => "已复制 hash";
-        public string CopySuccessPrefix => "  ✓ ";
 
         public string FormatRelativeTime(DateTimeOffset time)
         {
@@ -31,8 +29,12 @@ namespace GitBlameForVs.Localization
                 var when = FormatRelativeTime(lastEditTime ?? DateTimeOffset.Now);
                 return $"你, {when} · 未提交的更改";
             }
-            return $"{blame.Author}, {FormatRelativeTime(blame.AuthorTime)} • {blame.Summary}";
+            var summary = string.IsNullOrWhiteSpace(blame.Summary) ? string.Empty : $" - {blame.Summary}";
+            return $"{blame.Author}, {FormatRelativeTime(blame.AuthorTime)}{summary}";
         }
+
+        public string FormatAbsoluteTime(DateTimeOffset time) =>
+            time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
 
         public string FormatTooltip(BlameEntry blame, string? fullMessage)
         {
