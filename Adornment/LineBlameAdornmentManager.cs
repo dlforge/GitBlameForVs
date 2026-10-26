@@ -221,7 +221,12 @@ namespace GitBlameForVs.Adornment
 
             var currentViewLine = _textView.GetTextViewLineContainingBufferPosition(currentCaretPoint);
             if (currentViewLine != null)
-                _blameUI.Render(currentViewLine, blame, _lastEditTime, LoadCommitMessageAsync);
+                _blameUI.Render(
+                    currentViewLine,
+                    blame,
+                    _lastEditTime,
+                    LoadCommitMessageAsync,
+                    AuthorAvatarCache.GetOrFetchAsync);
         }
 
         private void RenderFailureAdornment(long generation, Exception error)

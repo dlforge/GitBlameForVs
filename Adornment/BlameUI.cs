@@ -7,6 +7,7 @@ using Microsoft.VisualStudio.Text.Formatting;
 using System;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
@@ -18,6 +19,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Ellipse = System.Windows.Shapes.Ellipse;
 using WpfPath = System.Windows.Shapes.Path;
@@ -110,7 +112,8 @@ namespace GitBlameForVs.Adornment
             ITextViewLine line,
             BlameEntry blame,
             DateTimeOffset? lastEditTime,
-            Func<BlameEntry, Task<string?>> loadCommitMessage)
+            Func<BlameEntry, Task<string?>> loadCommitMessage,
+            Func<string?, Task<byte[]?>> loadAuthorAvatar)
         {
             double remSize = _textView.FormattedLineSource.DefaultTextProperties.FontRenderingEmSize;
             double gutterGap = remSize * GitBlameGutterGapRem;
@@ -148,7 +151,7 @@ namespace GitBlameForVs.Adornment
             inlineBlameBorder.MouseEnter += (_, _) => inlineBlameBorder.Background = hoverBackground;
             inlineBlameBorder.MouseLeave += (_, _) => inlineBlameBorder.Background = Brushes.Transparent;
 
-            CreateTooltipPopup(inlineBlameBorder, blame, loadCommitMessage);
+            CreateTooltipPopup(inlineBlameBorder, blame, loadCommitMessage, loadAuthorAvatar);
             if (!blame.IsUncommitted)
                 inlineBlameBorder.ContextMenu = CreateCommitContextMenu(blame);
 
@@ -187,7 +190,11 @@ namespace GitBlameForVs.Adornment
             return hoverBackground;
         }
 
-        private static Border CreateAuthorAvatar(BlameEntry blame, double size, double gap)
+        private static FrameworkElement CreateAuthorAvatar(
+            BlameEntry blame,
+            double size,
+            double gap,
+            out Image avatarImage)
         {
             string identity = blame.AuthorMail?.Trim().Trim('<', '>') ?? string.Empty;
             if (string.IsNullOrWhiteSpace(identity))
@@ -203,15 +210,18 @@ namespace GitBlameForVs.Adornment
                 AuthorAvatarColors[(int)(hash % (uint)AuthorAvatarColors.Length)]);
             background.Freeze();
 
-            return new Border
+            var avatar = new Grid
             {
                 Width = size,
                 Height = size,
                 Margin = new Thickness(0, 0, gap, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                IsHitTestVisible = false
+            };
+            avatar.Children.Add(new Border
+            {
                 CornerRadius = new CornerRadius(size / 2),
                 Background = background,
-                VerticalAlignment = VerticalAlignment.Center,
-                IsHitTestVisible = false,
                 Child = new TextBlock
                 {
                     Text = GetAuthorInitials(blame.Author),
@@ -222,7 +232,17 @@ namespace GitBlameForVs.Adornment
                     VerticalAlignment = VerticalAlignment.Center,
                     TextAlignment = TextAlignment.Center
                 }
+            });
+            avatarImage = new Image
+            {
+                Width = size,
+                Height = size,
+                Stretch = Stretch.UniformToFill,
+                Clip = new EllipseGeometry(new Rect(0, 0, size, size)),
+                Visibility = Visibility.Collapsed
             };
+            avatar.Children.Add(avatarImage);
+            return avatar;
         }
 
         private static string GetAuthorInitials(string? author)
@@ -374,7 +394,8 @@ namespace GitBlameForVs.Adornment
         private Popup CreateTooltipPopup(
             Border anchor,
             BlameEntry blame,
-            Func<BlameEntry, Task<string?>> loadCommitMessage)
+            Func<BlameEntry, Task<string?>> loadCommitMessage,
+            Func<string?, Task<byte[]?>> loadAuthorAvatar)
         {
             var tooltipContent = new Border
             {
@@ -453,7 +474,8 @@ namespace GitBlameForVs.Adornment
                     return;
 
                 tooltipContentRequested = true;
-                _ = LoadTooltipContentAsync(tooltipContent, blame, loadCommitMessage);
+                _ = LoadTooltipContentAsync(
+                    tooltipContent, blame, loadCommitMessage, loadAuthorAvatar);
             };
             popup.Closed += (_, _) =>
             {
@@ -492,6 +514,8 @@ namespace GitBlameForVs.Adornment
 
                 var themeColor = VSColorTheme.GetThemedColor(
                     EnvironmentColors.ToolWindowBackgroundColorKey);
+                var accentColor = VSColorTheme.GetThemedColor(
+                    EnvironmentColors.AccentPaleColorKey);
                 var accentPolicy = new AccentPolicy
                 {
                     State = AccentState.EnableAcrylicBlurBehind,
@@ -513,7 +537,8 @@ namespace GitBlameForVs.Adornment
                     };
                     if (SetWindowCompositionAttribute(source.Handle, ref compositionData) != 0)
                     {
-                        tooltipContent.Background = Brushes.Transparent;
+                        tooltipContent.Background = CreateTooltipGradient(
+                            ToMediaColor(themeColor), ToMediaColor(accentColor), acrylic: true);
                         return;
                     }
                 }
@@ -532,8 +557,47 @@ namespace GitBlameForVs.Adornment
 
         private static void SetFallbackTooltipBackground(Border tooltipContent)
         {
-            tooltipContent.SetResourceReference(
-                Border.BackgroundProperty, EnvironmentColors.ToolWindowBackgroundBrushKey);
+            var themeColor = VSColorTheme.GetThemedColor(EnvironmentColors.ToolWindowBackgroundColorKey);
+            var accentColor = VSColorTheme.GetThemedColor(EnvironmentColors.AccentPaleColorKey);
+            tooltipContent.Background = CreateTooltipGradient(
+                ToMediaColor(themeColor), ToMediaColor(accentColor), acrylic: false);
+        }
+
+        private static Color ToMediaColor(System.Drawing.Color color) =>
+            Color.FromArgb(color.A, color.R, color.G, color.B);
+
+        private static LinearGradientBrush CreateTooltipGradient(
+            Color themeColor,
+            Color accentColor,
+            bool acrylic)
+        {
+            byte topOpacity = acrylic ? (byte)0x52 : (byte)0xFF;
+            byte middleOpacity = acrylic ? (byte)0x38 : (byte)0xFF;
+            byte bottomOpacity = acrylic ? (byte)0x60 : (byte)0xFF;
+            var gradient = new LinearGradientBrush
+            {
+                StartPoint = new Point(0, 0),
+                EndPoint = new Point(0, 1)
+            };
+            gradient.GradientStops.Add(new GradientStop(
+                BlendThemeColor(themeColor, accentColor, 0.22, topOpacity), 0));
+            gradient.GradientStops.Add(new GradientStop(
+                BlendThemeColor(themeColor, accentColor, 0.06, middleOpacity), 0.48));
+            gradient.GradientStops.Add(new GradientStop(
+                BlendThemeColor(themeColor, accentColor, 0.16, bottomOpacity), 1));
+            return gradient;
+        }
+
+        private static Color BlendThemeColor(Color themeColor, Color accentColor, double accentWeight, byte opacity)
+        {
+            byte BlendChannel(byte themeChannel, byte accentChannel) =>
+                (byte)Math.Round(themeChannel * (1 - accentWeight) + accentChannel * accentWeight);
+
+            return Color.FromArgb(
+                opacity,
+                BlendChannel(themeColor.R, accentColor.R),
+                BlendChannel(themeColor.G, accentColor.G),
+                BlendChannel(themeColor.B, accentColor.B));
         }
 
         private TextBlock CreateTooltipTextBlock(string text)
@@ -551,17 +615,38 @@ namespace GitBlameForVs.Adornment
         private async Task LoadTooltipContentAsync(
             Border tooltipContent,
             BlameEntry blame,
-            Func<BlameEntry, Task<string?>> loadCommitMessage)
+            Func<BlameEntry, Task<string?>> loadCommitMessage,
+            Func<string?, Task<byte[]?>> loadAuthorAvatar)
         {
             try
             {
+                Task<byte[]?>? avatarBytesTask = !blame.IsUncommitted &&
+                    !string.IsNullOrWhiteSpace(blame.AuthorMail)
+                        ? loadAuthorAvatar(blame.AuthorMail)
+                        : null;
                 string? fullMessage = blame.IsUncommitted
                     ? null
                     : await loadCommitMessage(blame);
 
-                tooltipContent.Child = blame.IsUncommitted
-                    ? CreateTooltipTextBlock(BlameText.FormatTooltip(blame, fullMessage))
-                    : CreateCommitTooltipContent(blame, fullMessage);
+                if (blame.IsUncommitted)
+                {
+                    tooltipContent.Child = CreateTooltipTextBlock(
+                        BlameText.FormatTooltip(blame, fullMessage));
+                    return;
+                }
+
+                var commitTooltip = CreateCommitTooltipContent(blame, fullMessage, out var avatarImage);
+                tooltipContent.Child = commitTooltip;
+                if (avatarBytesTask != null)
+                {
+                    var avatarBytes = await avatarBytesTask;
+                    var avatarSource = DecodeAvatarImage(avatarBytes);
+                    if (avatarSource != null)
+                    {
+                        avatarImage.Source = avatarSource;
+                        avatarImage.Visibility = Visibility.Visible;
+                    }
+                }
             }
             catch (Exception error)
             {
@@ -570,7 +655,34 @@ namespace GitBlameForVs.Adornment
             }
         }
 
-        private FrameworkElement CreateCommitTooltipContent(BlameEntry blame, string? fullMessage)
+        private static BitmapImage? DecodeAvatarImage(byte[]? avatarBytes)
+        {
+            if (avatarBytes == null)
+                return null;
+
+            try
+            {
+                using var stream = new MemoryStream(avatarBytes);
+                var image = new BitmapImage();
+                image.BeginInit();
+                image.CacheOption = BitmapCacheOption.OnLoad;
+                image.DecodePixelWidth = 128;
+                image.StreamSource = stream;
+                image.EndInit();
+                image.Freeze();
+                return image;
+            }
+            catch (Exception error)
+            {
+                Trace.TraceWarning($"Failed to decode author avatar: {error.Message}");
+                return null;
+            }
+        }
+
+        private FrameworkElement CreateCommitTooltipContent(
+            BlameEntry blame,
+            string? fullMessage,
+            out Image avatarImage)
         {
             var font = _textView.FormattedLineSource.DefaultTextProperties;
             var mutedForeground = CreateTooltipMutedForegroundBrush();
@@ -587,7 +699,10 @@ namespace GitBlameForVs.Adornment
             };
             double remSize = font.FontRenderingEmSize;
             authorHeader.Children.Add(CreateAuthorAvatar(
-                blame, remSize * GitBlameAvatarSizeRem, remSize * GitBlameGutterGapRem));
+                blame,
+                remSize * GitBlameAvatarSizeRem,
+                remSize * GitBlameGutterGapRem,
+                out avatarImage));
             authorHeader.Children.Add(new TextBlock
             {
                 Text = string.IsNullOrWhiteSpace(blame.Author) ? "-" : blame.Author,
