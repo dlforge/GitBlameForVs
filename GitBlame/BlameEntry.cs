@@ -4,7 +4,7 @@ namespace GitBlameForVs.GitBlame
 {
     /// <summary>
     /// Git blame porcelain 输出中单行记录的完整数据模型。
-    /// 文案格式化统一由 Localization 层的 IBlameTextProvider 负责。
+    /// 文案格式化统一由 Localization 层的 BlameText 负责。
     /// </summary>
     public class BlameEntry
     {

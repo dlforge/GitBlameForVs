@@ -5,7 +5,9 @@ using Microsoft.VisualStudio.Text.Editor;
 using Microsoft.VisualStudio.Text.Formatting;
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -20,7 +22,22 @@ namespace GitBlameForVs.Adornment
     internal sealed class LineBlameAdornmentManager
     {
         public const string LayerName = "GitBlameForVsBlameLayer";
-        private const double InlineBlameHorizontalGap = 8;
+        private const int GitBlameMaxAuthorCharsDisplayed = 20;
+        private const double GitBlameGutterMarginRem = 0.5;
+        private const double GitBlameGutterGapRem = 0.5;
+        private const double GitBlameAvatarSizeRem = 1.0;
+        private const double InlineBlameHoverOpacity = 0.08;
+        private static readonly Color[] AuthorAvatarColors =
+        {
+            Color.FromRgb(0x6B, 0x8E, 0xC1),
+            Color.FromRgb(0x8A, 0x6B, 0xB1),
+            Color.FromRgb(0x4F, 0x91, 0x8A),
+            Color.FromRgb(0xB0, 0x7A, 0x5A),
+            Color.FromRgb(0xA4, 0x67, 0x7E),
+            Color.FromRgb(0x6C, 0x87, 0x58),
+            Color.FromRgb(0x5D, 0x83, 0xA1),
+            Color.FromRgb(0x9A, 0x7C, 0x4F)
+        };
         private readonly IWpfTextView _textView;
         private readonly IAdornmentLayer? _layer;
         private readonly GitBlameCache _cache = new();
@@ -193,8 +210,8 @@ namespace GitBlameForVs.Adornment
                 return;
 
             var message = error is TimeoutException
-                ? BlameText.Current.BlameTimedOut
-                : BlameText.Current.BlameFailed;
+                ? BlameText.BlameTimedOut
+                : BlameText.BlameFailed;
             var textBlock = new TextBlock
             {
                 Text = message,
@@ -245,10 +262,13 @@ namespace GitBlameForVs.Adornment
 
         private void RenderAdornment(ITextViewLine line, BlameEntry blame)
         {
+            double remSize = _textView.FormattedLineSource.DefaultTextProperties.FontRenderingEmSize;
+            double gutterGap = remSize * GitBlameGutterGapRem;
             var foreground = CreateMutedForegroundBrush();
             var textBlock = new TextBlock
             {
-                Text = BlameText.Current.FormatInline(blame, _lastEditTime),
+                Text = BlameText.FormatInline(
+                    blame, _lastEditTime, GitBlameMaxAuthorCharsDisplayed),
                 Foreground = foreground,
                 FontSize = _textView.FormattedLineSource.DefaultTextProperties.FontRenderingEmSize,
                 TextTrimming = TextTrimming.CharacterEllipsis,
@@ -257,28 +277,44 @@ namespace GitBlameForVs.Adornment
                 Background = Brushes.Transparent,
                 FontFamily = _textView.FormattedLineSource.DefaultTextProperties.Typeface.FontFamily
             };
-            var blameIcon = CreateBlameIcon(foreground);
+            FrameworkElement leadingMark = blame.IsUncommitted
+                ? CreateBlameIcon(foreground, gutterGap)
+                : CreateAuthorAvatar(blame, remSize * GitBlameAvatarSizeRem, gutterGap);
             var inlineBlame = new DockPanel
             {
                 LastChildFill = true,
                 VerticalAlignment = VerticalAlignment.Center,
                 Cursor = Cursors.Arrow
             };
-            DockPanel.SetDock(blameIcon, Dock.Left);
-            inlineBlame.Children.Add(blameIcon);
+            DockPanel.SetDock(leadingMark, Dock.Left);
+            inlineBlame.Children.Add(leadingMark);
             inlineBlame.Children.Add(textBlock);
+
+            var inlineBlameBorder = new Border
+            {
+                Background = Brushes.Transparent,
+                Child = inlineBlame,
+                CornerRadius = new CornerRadius(2),
+                Padding = new Thickness(3, 1, 3, 1)
+            };
+            var hoverBackground = CreateHoverBackgroundBrush();
+            inlineBlameBorder.MouseEnter += (_, _) => inlineBlameBorder.Background = hoverBackground;
+            inlineBlameBorder.MouseLeave += (_, _) => inlineBlameBorder.Background = Brushes.Transparent;
 
             var toolTip = new ToolTip
             {
-                Content = BlameText.Current.TooltipLoading,
+                Content = BlameText.TooltipLoading,
                 FontFamily = _textView.FormattedLineSource.DefaultTextProperties.Typeface.FontFamily,
                 FontSize = _textView.FormattedLineSource.DefaultTextProperties.FontRenderingEmSize,
                 BorderThickness = new Thickness(1),
             };
-            inlineBlame.ToolTip = toolTip;
+            inlineBlameBorder.ToolTip = toolTip;
             toolTip.Opened += (s, e) => _ = OnToolTipOpenedAsync(toolTip, blame);
 
-            AddAdornment(line, inlineBlame);
+            if (!blame.IsUncommitted)
+                inlineBlameBorder.ContextMenu = CreateCommitContextMenu(blame);
+
+            AddAdornment(line, inlineBlameBorder);
         }
 
         private Brush CreateMutedForegroundBrush()
@@ -289,13 +325,142 @@ namespace GitBlameForVs.Adornment
             return mutedForeground;
         }
 
-        private static Canvas CreateBlameIcon(Brush foreground)
+        private Brush CreateHoverBackgroundBrush()
+        {
+            var foreground = _textView.FormattedLineSource.DefaultTextProperties.ForegroundBrush;
+            var hoverBackground = (Brush)foreground.CloneCurrentValue();
+            hoverBackground.Opacity *= InlineBlameHoverOpacity;
+            return hoverBackground;
+        }
+
+        private static Border CreateAuthorAvatar(BlameEntry blame, double size, double gap)
+        {
+            string identity = blame.AuthorMail?.Trim().Trim('<', '>') ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(identity))
+                identity = blame.Author?.Trim() ?? string.Empty;
+
+            uint hash = 2166136261;
+            foreach (char character in identity.ToUpperInvariant())
+            {
+                hash = unchecked((hash ^ character) * 16777619);
+            }
+
+            var background = new SolidColorBrush(
+                AuthorAvatarColors[(int)(hash % (uint)AuthorAvatarColors.Length)]);
+            background.Freeze();
+
+            return new Border
+            {
+                Width = size,
+                Height = size,
+                Margin = new Thickness(0, 0, gap, 0),
+                CornerRadius = new CornerRadius(size / 2),
+                Background = background,
+                VerticalAlignment = VerticalAlignment.Center,
+                IsHitTestVisible = false,
+                Child = new TextBlock
+                {
+                    Text = GetAuthorInitials(blame.Author),
+                    Foreground = Brushes.White,
+                    FontSize = size * 0.48,
+                    FontWeight = FontWeights.SemiBold,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    TextAlignment = TextAlignment.Center
+                }
+            };
+        }
+
+        private static string GetAuthorInitials(string? author)
+        {
+            string nonNullAuthor = author ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(nonNullAuthor))
+                return "?";
+
+            var words = nonNullAuthor.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (words.Length == 0)
+                return "?";
+
+            if (words.Length > 1)
+            {
+                return string.Concat(
+                    GetFirstTextElement(words[0]),
+                    GetFirstTextElement(words[words.Length - 1])).ToUpperInvariant();
+            }
+
+            var textElements = StringInfo.GetTextElementEnumerator(words[0]);
+            var initials = new StringBuilder();
+            for (int count = 0; count < 2 && textElements.MoveNext(); count++)
+            {
+                initials.Append(textElements.GetTextElement());
+            }
+
+            return initials.ToString().ToUpperInvariant();
+        }
+
+        private static string GetFirstTextElement(string value)
+        {
+            var textElements = StringInfo.GetTextElementEnumerator(value);
+            return textElements.MoveNext() ? textElements.GetTextElement() : string.Empty;
+        }
+
+        private static ContextMenu? CreateCommitContextMenu(BlameEntry blame)
+        {
+            string commitHash = blame.CommitHash ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(commitHash))
+                return null;
+
+            var menu = new ContextMenu();
+            var copyCommitHash = new MenuItem
+            {
+                Header = BlameText.CopyCommitHashMenuItem
+            };
+            copyCommitHash.Click += (_, _) => TryCopyCommitHashToClipboard(commitHash);
+            menu.Items.Add(copyCommitHash);
+            return menu;
+        }
+
+        private static bool TryCopyCommitHashToClipboard(string commitHash)
+        {
+            try
+            {
+                Clipboard.SetText(commitHash);
+                return true;
+            }
+            catch (Exception error)
+            {
+                Trace.TraceError($"Failed to copy Git commit hash: {error}");
+                return false;
+            }
+        }
+
+        private static Canvas CreateCopyIcon(Brush foreground)
         {
             var icon = new Canvas
             {
                 Width = 12,
                 Height = 12,
-                Margin = new Thickness(0, 0, 6, 0),
+                IsHitTestVisible = false
+            };
+            icon.Children.Add(new WpfPath
+            {
+                Data = Geometry.Parse("M 4,3 L 10,3 L 10,10 L 4,10 Z M 2,8 L 2,2 L 8,2"),
+                Stroke = foreground,
+                StrokeThickness = 1.1,
+                StrokeLineJoin = PenLineJoin.Round,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round
+            });
+            return icon;
+        }
+
+        private static Canvas CreateBlameIcon(Brush foreground, double gap)
+        {
+            var icon = new Canvas
+            {
+                Width = 12,
+                Height = 12,
+                Margin = new Thickness(0, 0, gap, 0),
                 VerticalAlignment = VerticalAlignment.Center,
                 IsHitTestVisible = false
             };
@@ -333,8 +498,10 @@ namespace GitBlameForVs.Adornment
             if (layer == null)
                 return;
 
-            double startX = Math.Max(line.TextRight, _textView.Caret.Left) + InlineBlameHorizontalGap;
-            double availableWidth = _textView.ViewportWidth - startX - InlineBlameHorizontalGap;
+            double gutterMargin = _textView.FormattedLineSource.DefaultTextProperties.FontRenderingEmSize
+                * GitBlameGutterMarginRem;
+            double startX = Math.Max(line.TextRight, _textView.Caret.Left) + gutterMargin;
+            double availableWidth = _textView.ViewportWidth - startX - gutterMargin;
             if (availableWidth <= 0)
                 return;
 
@@ -359,7 +526,7 @@ namespace GitBlameForVs.Adornment
             catch (Exception ex)
             {
                 Trace.TraceError($"Failed to load Git commit message: {ex}");
-                toolTip.Content = BlameText.Current.TooltipLoadFailed;
+                toolTip.Content = BlameText.TooltipLoadFailed;
             }
         }
 
@@ -377,7 +544,7 @@ namespace GitBlameForVs.Adornment
             }
 
             toolTip.Content = blame.IsUncommitted
-                ? BlameText.Current.FormatTooltip(blame, fullMessage)
+                ? BlameText.FormatTooltip(blame, fullMessage)
                 : CreateCommitTooltipContent(blame, fullMessage);
         }
 
@@ -396,6 +563,9 @@ namespace GitBlameForVs.Adornment
                 Orientation = Orientation.Horizontal,
                 Margin = new Thickness(0, 0, 0, 6)
             };
+            double remSize = font.FontRenderingEmSize;
+            authorHeader.Children.Add(CreateAuthorAvatar(
+                blame, remSize * GitBlameAvatarSizeRem, remSize * GitBlameGutterGapRem));
             authorHeader.Children.Add(new TextBlock
             {
                 Text = string.IsNullOrWhiteSpace(blame.Author) ? "-" : blame.Author,
@@ -428,7 +598,7 @@ namespace GitBlameForVs.Adornment
                 ? fullMessage
                 : !string.IsNullOrWhiteSpace(blame.Summary)
                     ? blame.Summary
-                    : BlameText.Current.FormatTooltip(blame, fullMessage);
+                    : BlameText.FormatTooltip(blame, fullMessage);
             content.Children.Add(new ScrollViewer
             {
                 Content = new TextBlock
@@ -464,11 +634,54 @@ namespace GitBlameForVs.Adornment
                 FontFamily = font.Typeface.FontFamily,
                 FontSize = font.FontRenderingEmSize
             };
-            DockPanel.SetDock(shortHash, Dock.Right);
-            footer.Children.Add(shortHash);
+            var hashControls = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            hashControls.Children.Add(shortHash);
+            if (!string.IsNullOrWhiteSpace(commitHash))
+            {
+                var copyFeedback = new TextBlock
+                {
+                    Foreground = mutedForeground,
+                    FontFamily = font.Typeface.FontFamily,
+                    FontSize = font.FontRenderingEmSize,
+                    Margin = new Thickness(4, 0, 0, 0),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Visibility = Visibility.Collapsed
+                };
+                var copyButton = new Button
+                {
+                    Content = CreateCopyIcon(mutedForeground),
+                    ToolTip = BlameText.CopyShaText,
+                    Width = 18,
+                    Height = 18,
+                    MinWidth = 0,
+                    MinHeight = 0,
+                    Padding = new Thickness(2),
+                    Margin = new Thickness(2, 0, 0, 0),
+                    Background = Brushes.Transparent,
+                    BorderThickness = new Thickness(0),
+                    Cursor = Cursors.Hand
+                };
+                copyButton.Click += (_, _) =>
+                {
+                    if (!TryCopyCommitHashToClipboard(commitHash))
+                        return;
+
+                    copyFeedback.Text = BlameText.CopyShaText;
+                    copyFeedback.Visibility = Visibility.Visible;
+                };
+                hashControls.Children.Add(copyButton);
+                hashControls.Children.Add(copyFeedback);
+            }
+
+            DockPanel.SetDock(hashControls, Dock.Right);
+            footer.Children.Add(hashControls);
             footer.Children.Add(new TextBlock
             {
-                Text = BlameText.Current.FormatAbsoluteTime(blame.CommitterTime ?? blame.AuthorTime),
+                Text = BlameText.FormatAbsoluteTime(blame.CommitterTime ?? blame.AuthorTime),
                 Foreground = mutedForeground,
                 FontFamily = font.Typeface.FontFamily,
                 FontSize = font.FontRenderingEmSize
