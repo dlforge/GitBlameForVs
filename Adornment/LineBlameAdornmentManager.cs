@@ -13,11 +13,13 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Ellipse = System.Windows.Shapes.Ellipse;
 using WpfPath = System.Windows.Shapes.Path;
+using Microsoft.VisualStudio.PlatformUI;
 
 namespace GitBlameForVs.Adornment
 {
@@ -380,6 +382,17 @@ namespace GitBlameForVs.Adornment
             return mutedForeground;
         }
 
+        private static Brush CreateTooltipMutedForegroundBrush()
+        {
+            var foreground = Application.Current?.TryFindResource(
+                EnvironmentColors.ToolWindowTextBrushKey) as Brush;
+            var mutedForeground = foreground != null
+                ? (Brush)foreground.CloneCurrentValue()
+                : (Brush)SystemColors.ControlTextBrush.CloneCurrentValue();
+            mutedForeground.Opacity *= 0.7;
+            return mutedForeground;
+        }
+
         private Brush CreateHoverBackgroundBrush()
         {
             var foreground = _textView.FormattedLineSource.DefaultTextProperties.ForegroundBrush;
@@ -574,23 +587,29 @@ namespace GitBlameForVs.Adornment
 
         private Popup CreateTooltipPopup(Border anchor, BlameEntry blame)
         {
-            var font = _textView.FormattedLineSource.DefaultTextProperties;
             var tooltipContent = new Border
             {
-                Background = SystemColors.InfoBrush,
-                BorderBrush = SystemColors.ActiveBorderBrush,
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(2),
                 Padding = new Thickness(8),
                 MaxWidth = 500,
                 Child = CreateTooltipTextBlock(BlameText.TooltipLoading)
             };
+            tooltipContent.SetResourceReference(
+                Border.BackgroundProperty, EnvironmentColors.ToolWindowBackgroundBrushKey);
+            tooltipContent.SetResourceReference(
+                Border.BorderBrushProperty, EnvironmentColors.ToolWindowBorderBrushKey);
+            tooltipContent.SetResourceReference(
+                TextElement.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+
             var popup = new Popup
             {
                 AllowsTransparency = true,
                 Child = tooltipContent,
-                Placement = PlacementMode.Bottom,
+                Placement = PlacementMode.RelativePoint,
                 PlacementTarget = anchor,
+                HorizontalOffset = 12,
+                VerticalOffset = 16,
                 StaysOpen = true
             };
             var closeTimer = new DispatcherTimer
@@ -608,7 +627,13 @@ namespace GitBlameForVs.Adornment
             anchor.MouseEnter += (_, _) =>
             {
                 closeTimer.Stop();
+                UpdatePopupPosition();
                 popup.IsOpen = true;
+            };
+            anchor.MouseMove += (_, _) =>
+            {
+                if (anchor.IsMouseOver)
+                    UpdatePopupPosition();
             };
             anchor.MouseLeave += (_, _) => SchedulePopupClose();
             tooltipContent.MouseEnter += (_, _) => closeTimer.Stop();
@@ -633,6 +658,12 @@ namespace GitBlameForVs.Adornment
             {
                 closeTimer.Stop();
                 closeTimer.Start();
+            }
+
+            void UpdatePopupPosition()
+            {
+                var pointerPosition = Mouse.GetPosition(anchor);
+                popup.PlacementRectangle = new Rect(pointerPosition, new Size(0, 0));
             }
         }
 
@@ -677,7 +708,7 @@ namespace GitBlameForVs.Adornment
         private FrameworkElement CreateCommitTooltipContent(BlameEntry blame, string? fullMessage)
         {
             var font = _textView.FormattedLineSource.DefaultTextProperties;
-            var mutedForeground = CreateMutedForegroundBrush();
+            var mutedForeground = CreateTooltipMutedForegroundBrush();
             var content = new StackPanel
             {
                 MaxWidth = 480,
