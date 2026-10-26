@@ -1,6 +1,10 @@
-﻿using System.Collections.Concurrent;
+﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Runtime.ExceptionServices;
+using System.Threading;
 using System.Threading.Tasks;
+using System.Diagnostics.CodeAnalysis;
 
 namespace GitBlameForVs.GitBlame
 {
@@ -9,8 +13,9 @@ namespace GitBlameForVs.GitBlame
         // 按文件路径存放"整份文件的行号 -> blame 信息"映射
         private readonly ConcurrentDictionary<string, Dictionary<int, GitBlameInfo>> _fileCache = new();
 
-        // 防止同一个文件的预取任务被并发触发多次（比如快速连续移动光标）
-        private readonly ConcurrentDictionary<string, Task> _prefetchTasks = new();
+        private readonly Dictionary<string, Task<PrefetchResult>> _prefetchTasks = new();
+        private readonly object _prefetchTasksLock = new();
+        private readonly CancellationTokenSource _lifetimeCancellationSource = new();
 
         /// <summary>
         /// 获取指定文件指定行的 blame 信息。
@@ -18,39 +23,115 @@ namespace GitBlameForVs.GitBlame
         /// <param name="filePath"></param>
         /// <param name="line"></param>
         /// <returns></returns>
-        public async Task<GitBlameInfo?> GetOrFetchAsync(string filePath, int line)
+        public async Task<GitBlameInfo?> GetOrFetchAsync(
+            string filePath,
+            int line,
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             // 已经预取完成，直接查表，零额外开销
             if (_fileCache.TryGetValue(filePath, out var lineDict))
                 return lineDict.TryGetValue(line, out var cached) ? cached : null;
 
-            // 预取还没完成（比如文件刚打开），先确保预取任务已启动，
-            // 同时用单行查询作为过渡方案立即返回结果，避免用户等待
-            await EnsurePrefetchStartedAsync(filePath);
-            return await GitBlameService.GetBlameAsync(filePath, line);
+            var prefetchTask = GetPrefetchTaskAsync(filePath);
+            var prefetchResult = await AwaitWithCancellationAsync(prefetchTask, cancellationToken)
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (prefetchResult.Error != null)
+            {
+                lock (_prefetchTasksLock)
+                {
+                    if (_prefetchTasks.TryGetValue(filePath, out var currentTask) &&
+                        ReferenceEquals(currentTask, prefetchTask))
+                    {
+                        _prefetchTasks.Remove(filePath);
+                    }
+                }
+
+                ExceptionDispatchInfo.Capture(prefetchResult.Error).Throw();
+            }
+
+            if (prefetchResult.BlameByLine != null)
+            {
+                _fileCache[filePath] = prefetchResult.BlameByLine;
+                return prefetchResult.BlameByLine.TryGetValue(line, out var cached)
+                    ? cached
+                    : null;
+            }
+
+            return await GitBlameService.GetBlameAsync(filePath, line, cancellationToken)
+                .ConfigureAwait(false);
         }
 
-        /// <summary>
-        /// 触发整份文件的后台预取。重复调用是安全的——
-        /// 同一个文件路径的预取任务只会真正执行一次。
-        /// </summary>
-        public async Task EnsurePrefetchStartedAsync(string filePath)
+        private Task<PrefetchResult> GetPrefetchTaskAsync(string filePath)
         {
-            await _prefetchTasks.GetOrAdd(filePath, _ => PrefetchFileAsync(filePath));
+            lock (_prefetchTasksLock)
+            {
+                if (_prefetchTasks.TryGetValue(filePath, out var prefetchTask))
+                    return prefetchTask;
+
+                prefetchTask = PrefetchFileAsync(filePath);
+                _prefetchTasks[filePath] = prefetchTask;
+                return prefetchTask;
+            }
         }
 
-        /// <summary>
-        /// 后台预取整份文件的 blame 信息，并缓存到 _fileCache 中。
-        /// </summary>
-        /// <param name="filePath"></param>
-        /// <returns></returns>
-        private async Task PrefetchFileAsync(string filePath)
+        private async Task<PrefetchResult> PrefetchFileAsync(string filePath)
         {
-            var result = await GitBlameService.GetBlameForWholeFileAsync(filePath);
-            if (result != null)
-                _fileCache[filePath] = result;
+            try
+            {
+                var blameByLine = await GitBlameService.GetBlameForWholeFileAsync(
+                    filePath,
+                    _lifetimeCancellationSource.Token);
+                return new PrefetchResult(blameByLine, null);
+            }
+            catch (Exception error)
+            {
+                return new PrefetchResult(null, error);
+            }
+        }
 
-            _prefetchTasks.TryRemove(filePath, out _);
+        public void CancelPendingWork()
+        {
+            _lifetimeCancellationSource.Cancel();
+        }
+
+        [SuppressMessage(
+            "Usage",
+            "VSTHRD003",
+            Justification = "The shared prefetch task performs process I/O without capturing the UI context.")]
+        private static async Task<T> AwaitWithCancellationAsync<T>(
+            Task<T> task,
+            CancellationToken cancellationToken)
+        {
+            if (task.IsCompleted)
+                return await task.ConfigureAwait(false);
+
+            var cancellationSource = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            using (cancellationToken.Register(() => cancellationSource.TrySetResult(true)))
+            {
+                var completedTask = await Task.WhenAny(task, cancellationSource.Task).ConfigureAwait(false);
+                if (completedTask != task)
+                    throw new OperationCanceledException(cancellationToken);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            return await task.ConfigureAwait(false);
+        }
+
+        private sealed class PrefetchResult
+        {
+            public PrefetchResult(Dictionary<int, GitBlameInfo>? blameByLine, Exception? error)
+            {
+                BlameByLine = blameByLine;
+                Error = error;
+            }
+
+            public Dictionary<int, GitBlameInfo>? BlameByLine { get; }
+            public Exception? Error { get; }
         }
 
         /// <summary>
@@ -60,7 +141,8 @@ namespace GitBlameForVs.GitBlame
         public void InvalidateFile(string filePath)
         {
             _fileCache.TryRemove(filePath, out _);
-            _prefetchTasks.TryRemove(filePath, out _);
+            lock (_prefetchTasksLock)
+                _prefetchTasks.Remove(filePath);
         }
     }
 }

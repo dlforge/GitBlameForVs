@@ -8,6 +8,8 @@ namespace GitBlameForVs.Localization
     {
         public string TooltipLoading => "加载中...";
         public string TooltipLoadFailed => "加载提交信息失败";
+        public string BlameTimedOut => "Git blame 查询超时";
+        public string BlameFailed => "Git blame 查询失败";
         public string CopyHashFeedback => "已复制 hash";
         public string CopySuccessPrefix => "  ✓ ";
 

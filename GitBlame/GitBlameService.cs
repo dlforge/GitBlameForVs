@@ -10,43 +10,42 @@ using System.Threading;
 namespace GitBlameForVs.GitBlame;
 public class GitBlameService
 {
+    private static readonly TimeSpan SingleLineBlameTimeout = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan WholeFileBlameTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan CommitMessageTimeout = TimeSpan.FromSeconds(3);
+
     /// <summary>
     /// 获取指定文件指定行的 blame 信息。
     /// </summary>
     /// <param name="filePath">文件路径</param>
     /// <param name="lineNumber1Based">行号（从 1 开始）</param>
-    /// <returns>返回对应行的 GitBlameInfo，如果文件不存在或发生错误则返回 null</returns>
-    public static async Task<GitBlameInfo?> GetBlameAsync(string filePath, int lineNumber1Based)
+    /// <returns>返回对应行的 GitBlameInfo；文件不可 blame 时返回 null</returns>
+    /// <exception cref="GitCommandException">Git 返回未预期的错误</exception>
+    /// <exception cref="TimeoutException">Git 命令超过超时时间</exception>
+    public static async Task<GitBlameInfo?> GetBlameAsync(
+        string filePath,
+        int lineNumber1Based,
+        CancellationToken cancellationToken = default)
     {
         if (!File.Exists(filePath)) return null;
 
         var workingDir = Path.GetDirectoryName(filePath);
         var args = $"blame -L {lineNumber1Based},{lineNumber1Based} --porcelain -- \"{Path.GetFileName(filePath)}\"";
+        var result = await RunGitAsync(
+            CreateGitStartInfo(args, workingDir),
+            "git blame",
+            SingleLineBlameTimeout,
+            cancellationToken);
 
-        var psi = new ProcessStartInfo
+        if (result.ExitCode != 0)
         {
-            FileName = "git",
-            Arguments = args,
-            WorkingDirectory = workingDir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8
-        };
+            if (IsExpectedNoBlameFailure(result.StandardError))
+                return null;
 
-        try
-        {
-            using var process = Process.Start(psi);
-            string output = await process.StandardOutput.ReadToEndAsync();
-            await Task.Run(() => process.WaitForExit(3000));
-            return ParsePorcelain(output);
+            throw new GitCommandException("git blame", result.ExitCode, result.StandardError);
         }
-        catch
-        {
-            // git 未安装 / 不是 git 仓库 / 文件未跟踪等，静默失败
-            return null;
-        }
+
+        return ParsePorcelain(result.StandardOutput);
     }
 
     /// <summary>
@@ -70,34 +69,24 @@ public class GitBlameService
     /// <param name="workingDir"></param>
     /// <param name="commitHash"></param>
     /// <returns></returns>
-    public static async Task<string?> GetFullCommitMessageAsync(string workingDir, string commitHash)
+    public static async Task<string?> GetFullCommitMessageAsync(
+        string workingDir,
+        string commitHash,
+        CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrEmpty(commitHash) || commitHash.StartsWith("0000000"))
+        if (!IsObjectId(commitHash) || IsZeroObjectId(commitHash))
             return null;
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = "git",
-            Arguments = $"log -1 --format=%B {commitHash}",
-            WorkingDirectory = workingDir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8
-        };
+        var result = await RunGitAsync(
+            CreateGitStartInfo($"log -1 --format=%B {commitHash}", workingDir),
+            "git log",
+            CommitMessageTimeout,
+            cancellationToken);
 
-        try
-        {
-            using var process = Process.Start(psi);
-            string output = await process.StandardOutput.ReadToEndAsync();
-            await Task.Run(() => process.WaitForExit(3000));
-            return output?.Trim();
-        }
-        catch
-        {
-            return null;
-        }
+        if (result.ExitCode != 0)
+            throw new GitCommandException("git log", result.ExitCode, result.StandardError);
+
+        return result.StandardOutput.Trim();
     }
 
     /// <summary>
@@ -105,37 +94,160 @@ public class GitBlameService
     /// </summary>
     /// <param name="filePath">文件路径</param>
     /// <returns></returns>
-    public static async Task<Dictionary<int, GitBlameInfo>?> GetBlameForWholeFileAsync(string filePath)
+    public static async Task<Dictionary<int, GitBlameInfo>?> GetBlameForWholeFileAsync(
+        string filePath,
+        CancellationToken cancellationToken = default)
     {
         if (!File.Exists(filePath)) return null;
 
         var workingDir = Path.GetDirectoryName(filePath);
         var args = $"blame --porcelain -- \"{Path.GetFileName(filePath)}\"";
+        var result = await RunGitAsync(
+            CreateGitStartInfo(args, workingDir),
+            "git blame",
+            WholeFileBlameTimeout,
+            cancellationToken);
 
-        var psi = new ProcessStartInfo
+        if (result.ExitCode != 0)
+        {
+            if (IsExpectedNoBlameFailure(result.StandardError))
+                return new Dictionary<int, GitBlameInfo>();
+
+            throw new GitCommandException("git blame", result.ExitCode, result.StandardError);
+        }
+
+        return ParsePorcelainWholeFile(result.StandardOutput);
+    }
+
+    private static ProcessStartInfo CreateGitStartInfo(string arguments, string? workingDirectory)
+    {
+        return new ProcessStartInfo
         {
             FileName = "git",
-            Arguments = args,
-            WorkingDirectory = workingDir,
+            Arguments = arguments,
+            WorkingDirectory = workingDirectory ?? Environment.CurrentDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        };
+    }
+
+    private static async Task<GitProcessResult> RunGitAsync(
+        ProcessStartInfo startInfo,
+        string operation,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        using var process = new Process
+        {
+            StartInfo = startInfo,
+            EnableRaisingEvents = true
         };
 
-        try
+        if (!process.Start())
+            throw new InvalidOperationException($"Could not start {operation}.");
+
+        var standardOutputTask = process.StandardOutput.ReadToEndAsync();
+        var standardErrorTask = process.StandardError.ReadToEndAsync();
+        var exitTask = WaitForExitAsync(process);
+
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var timeoutTask = Task.Delay(timeout, timeoutSource.Token);
+        var completedTask = await Task.WhenAny(exitTask, timeoutTask).ConfigureAwait(false);
+
+        if (completedTask != exitTask && !exitTask.IsCompleted)
         {
-            using var process = Process.Start(psi);
-            string output = await process.StandardOutput.ReadToEndAsync();
-            // 全文件 blame 比单行慢很多，大文件给更宽松的超时时间
-            await Task.Run(() => process.WaitForExit(15000));
-            return ParsePorcelainWholeFile(output);
+            await TerminateProcessAsync(process, exitTask).ConfigureAwait(false);
+            await Task.WhenAll(standardOutputTask, standardErrorTask).ConfigureAwait(false);
+
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new TimeoutException($"{operation} exceeded the {timeout.TotalSeconds:0}-second timeout.");
         }
-        catch
+
+        timeoutSource.Cancel();
+        await exitTask.ConfigureAwait(false);
+        var standardOutput = await standardOutputTask.ConfigureAwait(false);
+        var standardError = await standardErrorTask.ConfigureAwait(false);
+
+        return new GitProcessResult(standardOutput, standardError, process.ExitCode);
+    }
+
+    private static Task WaitForExitAsync(Process process)
+    {
+        var completionSource = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        EventHandler exitedHandler = null!;
+        exitedHandler = (_, _) =>
         {
-            return null;
+            process.Exited -= exitedHandler;
+            completionSource.TrySetResult(true);
+        };
+
+        process.Exited += exitedHandler;
+        if (process.HasExited)
+            exitedHandler(process, EventArgs.Empty);
+
+        return completionSource.Task;
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Usage",
+        "VSTHRD003",
+        Justification = "The process exit task is completed by the Process.Exited event and does not capture the UI context.")]
+    private static async Task TerminateProcessAsync(Process process, Task exitTask)
+    {
+        if (!process.HasExited)
+        {
+            try
+            {
+                process.Kill();
+            }
+            catch (InvalidOperationException) when (process.HasExited)
+            {
+            }
         }
+
+        await exitTask.ConfigureAwait(false);
+    }
+
+    private static bool IsExpectedNoBlameFailure(string standardError)
+    {
+        var message = standardError.ToLowerInvariant();
+        return message.Contains("not a git repository") ||
+               message.Contains("no such path") ||
+               message.Contains("no such ref: head") ||
+               message.Contains("no commits yet");
+    }
+
+    private static bool IsZeroObjectId(string objectId)
+    {
+        foreach (char character in objectId)
+        {
+            if (character != '0')
+                return false;
+        }
+
+        return true;
+    }
+
+    private sealed class GitProcessResult
+    {
+        public GitProcessResult(string standardOutput, string standardError, int exitCode)
+        {
+            StandardOutput = standardOutput;
+            StandardError = standardError;
+            ExitCode = exitCode;
+        }
+
+        public string StandardOutput { get; }
+        public string StandardError { get; }
+        public int ExitCode { get; }
     }
 
     private static Dictionary<int, GitBlameInfo> ParsePorcelainWholeFile(string output)
@@ -327,4 +439,17 @@ public class GitBlameService
         destination.FileName = source.FileName;
         destination.IsBoundary = source.IsBoundary;
     }
+}
+
+internal sealed class GitCommandException : Exception
+{
+    public GitCommandException(string operation, int exitCode, string standardError)
+        : base($"{operation} exited with code {exitCode}: {standardError.Trim()}")
+    {
+        ExitCode = exitCode;
+        StandardError = standardError;
+    }
+
+    public int ExitCode { get; }
+    public string StandardError { get; }
 }

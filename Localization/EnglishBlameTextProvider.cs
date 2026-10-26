@@ -8,6 +8,8 @@ namespace GitBlameForVs.Localization
     {
         public string TooltipLoading => "Loading...";
         public string TooltipLoadFailed => "Failed to load commit info";
+        public string BlameTimedOut => "Git blame timed out";
+        public string BlameFailed => "Git blame failed";
         public string CopyHashFeedback => "Copied hash";
         public string CopySuccessPrefix => "  ✓ ";
 

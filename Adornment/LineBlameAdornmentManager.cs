@@ -4,6 +4,7 @@ using Microsoft.VisualStudio.Text;
 using Microsoft.VisualStudio.Text.Editor;
 using Microsoft.VisualStudio.Text.Formatting;
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -36,13 +37,13 @@ namespace GitBlameForVs.Adornment
 
         public LineBlameAdornmentManager(IWpfTextView textView)
         {
+            _textView = textView;
             _layer = textView.GetAdornmentLayer(LayerName);
             if (_layer == null)
             {
                 return;
             }
 
-            _textView = textView;
             _textView.TextBuffer.Properties.TryGetProperty(
                 typeof(ITextDocument), out _document);
 
@@ -58,8 +59,7 @@ namespace GitBlameForVs.Adornment
             _textView.Closed += OnClosed;
             _document.FileActionOccurred += OnFileActionOccurred;
 
-            _ = _cache.EnsurePrefetchStartedAsync(_document.FilePath);
-            _ = RefreshUncommittedStatusAsync(_document.FilePath);
+            RequestUpdate();
         }
 
         private void OnBufferChanged(object sender, TextContentChangedEventArgs e)
@@ -75,13 +75,8 @@ namespace GitBlameForVs.Adornment
             {
                 _cache.InvalidateFile(e.FilePath);
                 _baselineSnapshot = _textView.TextBuffer.CurrentSnapshot;
-                _ = RefreshUncommittedStatusAsync(e.FilePath);
                 RequestUpdate();
             }
-        }
-        private async Task RefreshUncommittedStatusAsync(string filePath)
-        {
-            RequestUpdate();
         }
 
         private void OnCaretPositionChanged(object sender, CaretPositionChangedEventArgs e)
@@ -101,27 +96,52 @@ namespace GitBlameForVs.Adornment
 
         private void RequestUpdate()
         {
-            _debounceCts?.Cancel();
-            _debounceCts?.Dispose();
-            _debounceCts = new CancellationTokenSource();
-            var token = _debounceCts.Token;
+            var cancellationSource = new CancellationTokenSource();
+            var previousCancellationSource = _debounceCts;
+            _debounceCts = cancellationSource;
             long generation = Interlocked.Increment(ref _updateGeneration);
-            _ = DebouncedUpdateAsync(token, generation);
+            previousCancellationSource?.Cancel();
+            _ = DebouncedUpdateAsync(cancellationSource, generation);
         }
 
-        private async Task DebouncedUpdateAsync(CancellationToken token, long generation)
+        private async Task DebouncedUpdateAsync(
+            CancellationTokenSource cancellationSource,
+            long generation)
         {
+            var cancellationToken = cancellationSource.Token;
+
             try
             {
-                if (token.IsCancellationRequested) return;
-                await UpdateAdornmentAsync(generation);
+                await Task.Delay(TimeSpan.FromMilliseconds(150), cancellationToken);
+                await UpdateAdornmentAsync(generation, cancellationToken);
             }
-            catch (TaskCanceledException) { }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+            }
+            catch (TimeoutException error)
+            {
+                Trace.TraceWarning($"Git blame timed out: {error}");
+                RenderFailureAdornment(generation, error);
+            }
+            catch (Exception error)
+            {
+                Trace.TraceError($"Git blame failed: {error}");
+                RenderFailureAdornment(generation, error);
+            }
+            finally
+            {
+                if (ReferenceEquals(_debounceCts, cancellationSource))
+                    _debounceCts = null;
+
+                cancellationSource.Dispose();
+            }
         }
         private bool IsLatest(long generation) => generation == Interlocked.Read(ref _updateGeneration);
 
-        private async Task UpdateAdornmentAsync(long generation)
+        private async Task UpdateAdornmentAsync(long generation, CancellationToken cancellationToken)
         {
+            _layer?.RemoveAllAdornments();
+
             var caretPoint = _textView.Caret.Position.BufferPosition;
             var snapshotLine = caretPoint.GetContainingLine();
 
@@ -137,10 +157,12 @@ namespace GitBlameForVs.Adornment
             if (string.IsNullOrEmpty(filePath)) return;
 
             int lineNumber1Based = snapshotLine.LineNumber + 1;
-            var blame = await _cache.GetOrFetchAsync(filePath, lineNumber1Based);
+            var blame = await _cache.GetOrFetchAsync(filePath, lineNumber1Based, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             if (blame == null) return;
 
-            var currentSnapshotLine = _textView.Caret.Position.BufferPosition.GetContainingLine();
+            var currentCaretPoint = _textView.Caret.Position.BufferPosition;
+            var currentSnapshotLine = currentCaretPoint.GetContainingLine();
             if (currentSnapshotLine.LineNumber != snapshotLine.LineNumber)
                 return;
 
@@ -149,8 +171,40 @@ namespace GitBlameForVs.Adornment
 
             if (!IsLatest(generation)) return;
 
-            _layer!.RemoveAllAdornments();
-            RenderAdornment(viewLine, blame);
+            var currentViewLine = _textView.GetTextViewLineContainingBufferPosition(currentCaretPoint);
+            if (currentViewLine != null)
+                RenderAdornment(currentViewLine, blame);
+        }
+
+        private void RenderFailureAdornment(long generation, Exception error)
+        {
+            if (!IsLatest(generation) || _textView.IsClosed || _layer == null)
+                return;
+
+            var caretPoint = _textView.Caret.Position.BufferPosition;
+            var snapshotLine = caretPoint.GetContainingLine();
+            if (IsLineContentChanged(snapshotLine))
+                return;
+
+            var viewLine = _textView.GetTextViewLineContainingBufferPosition(caretPoint);
+            if (viewLine == null)
+                return;
+
+            var message = error is TimeoutException
+                ? BlameText.Current.BlameTimedOut
+                : BlameText.Current.BlameFailed;
+            var textBlock = new TextBlock
+            {
+                Text = message,
+                Foreground = Brushes.DarkOrange,
+                FontSize = _textView.FormattedLineSource.DefaultTextProperties.FontRenderingEmSize,
+                Cursor = Cursors.Arrow,
+                Background = Brushes.Transparent,
+                FontFamily = _textView.FormattedLineSource.DefaultTextProperties.Typeface.FontFamily,
+                ToolTip = error.Message
+            };
+
+            AddAdornment(viewLine, textBlock);
         }
 
         /// <summary>
@@ -217,12 +271,21 @@ namespace GitBlameForVs.Adornment
                 textBlock.MouseLeftButtonDown += (s, e) => OnBlameLeftClick(textBlock, blame);
             }
 
+            AddAdornment(line, textBlock);
+        }
+
+        private void AddAdornment(ITextViewLine line, TextBlock textBlock)
+        {
+            var layer = _layer;
+            if (layer == null)
+                return;
+
             textBlock.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
 
             double startX = Math.Max(line.TextRight, _textView.Caret.Left);
             Canvas.SetLeft(textBlock, startX + 60);
             Canvas.SetTop(textBlock, line.TextTop);
-            _layer.AddAdornment(
+            layer.AddAdornment(
                 AdornmentPositioningBehavior.TextRelative,
                 new SnapshotSpan(line.Start, line.End),
                 tag: null,
@@ -238,6 +301,7 @@ namespace GitBlameForVs.Adornment
             }
             catch (Exception ex)
             {
+                Trace.TraceError($"Failed to load Git commit message: {ex}");
                 toolTip.Content = BlameText.Current.TooltipLoadFailed;
             }
         }
@@ -292,7 +356,7 @@ namespace GitBlameForVs.Adornment
 
         private string GetFilePath()
         {
-            return _document.FilePath;
+            return _document?.FilePath ?? string.Empty;
         }
 
         private void OnClosed(object sender, EventArgs e)
@@ -305,8 +369,11 @@ namespace GitBlameForVs.Adornment
             if (_document != null)
                 _document.FileActionOccurred -= OnFileActionOccurred;
 
-            _debounceCts?.Cancel();
-            _debounceCts?.Dispose();
+            Interlocked.Increment(ref _updateGeneration);
+            var cancellationSource = _debounceCts;
+            _debounceCts = null;
+            cancellationSource?.Cancel();
+            _cache.CancelPendingWork();
         }
     }
 }
