@@ -23,7 +23,7 @@ public class Git
     /// <returns>返回对应行的 GitBlameInfo；文件不可 blame 时返回 null</returns>
     /// <exception cref="GitCommandException">Git 返回未预期的错误</exception>
     /// <exception cref="TimeoutException">Git 命令超过超时时间</exception>
-    public static async Task<BlameInfo?> GetBlameAsync(
+    public static async Task<BlameEntry?> GetBlameAsync(
         string filePath,
         int lineNumber1Based,
         CancellationToken cancellationToken = default)
@@ -54,7 +54,7 @@ public class Git
     /// </summary>
     /// <param name="output">git blame --porcelain 输出内容</param>
     /// <returns>返回解析后的 GitBlameInfo，如果解析失败则返回 null</returns>
-    private static BlameInfo? ParsePorcelain(string output)
+    private static BlameEntry? ParsePorcelain(string output)
     {
         if (string.IsNullOrWhiteSpace(output)) return null;
 
@@ -95,7 +95,7 @@ public class Git
     /// </summary>
     /// <param name="filePath">文件路径</param>
     /// <returns></returns>
-    public static async Task<Dictionary<int, BlameInfo>?> GetBlameForWholeFileAsync(
+    public static async Task<Dictionary<int, BlameEntry>?> GetBlameForWholeFileAsync(
         string filePath,
         CancellationToken cancellationToken = default)
     {
@@ -112,7 +112,7 @@ public class Git
         if (result.ExitCode != 0)
         {
             if (IsExpectedNoBlameFailure(result.StandardError))
-                return new Dictionary<int, BlameInfo>();
+                return new Dictionary<int, BlameEntry>();
 
             throw new GitCommandException("git blame", result.ExitCode, result.StandardError);
         }
@@ -251,15 +251,15 @@ public class Git
         public int ExitCode { get; }
     }
 
-    private static Dictionary<int, BlameInfo> ParsePorcelainWholeFile(string output)
+    private static Dictionary<int, BlameEntry> ParsePorcelainWholeFile(string output)
     {
-        var result = new Dictionary<int, BlameInfo>();
+        var result = new Dictionary<int, BlameEntry>();
         if (string.IsNullOrWhiteSpace(output)) return result;
 
         // Git omits repeated commit metadata in porcelain output.
-        var commitCache = new Dictionary<string, BlameInfo>();
+        var commitCache = new Dictionary<string, BlameEntry>();
         var lines = output.Split('\n');
-        BlameInfo? currentBlame = null;
+        BlameEntry? currentBlame = null;
 
         foreach (var rawLine in lines)
         {
@@ -268,7 +268,7 @@ public class Git
             {
                 CompleteBlame(currentBlame, result, commitCache);
 
-                currentBlame = new BlameInfo
+                currentBlame = new BlameEntry
                 {
                     CommitHash = commitHash,
                     OriginalLineNumber = originalLineNumber,
@@ -351,7 +351,7 @@ public class Git
         return true;
     }
 
-    private static void ParseMetadata(BlameInfo blame, string line)
+    private static void ParseMetadata(BlameEntry blame, string line)
     {
         if (line.StartsWith("author ", StringComparison.Ordinal))
             blame.Author = line.Substring("author ".Length);
@@ -394,7 +394,7 @@ public class Git
         }
     }
 
-    private static void ParsePrevious(BlameInfo blame, string value)
+    private static void ParsePrevious(BlameEntry blame, string value)
     {
         var separatorIndex = value.IndexOf(' ');
         if (separatorIndex <= 0)
@@ -409,9 +409,9 @@ public class Git
     }
 
     private static void CompleteBlame(
-        BlameInfo? blame,
-        Dictionary<int, BlameInfo> result,
-        Dictionary<string, BlameInfo> commitCache)
+        BlameEntry? blame,
+        Dictionary<int, BlameEntry> result,
+        Dictionary<string, BlameEntry> commitCache)
     {
         if (blame == null || blame.CommitHash == null)
             return;
@@ -424,7 +424,7 @@ public class Git
         result[blame.FinalLineNumber] = blame;
     }
 
-    private static void CopyCommitMetadata(BlameInfo source, BlameInfo destination)
+    private static void CopyCommitMetadata(BlameEntry source, BlameEntry destination)
     {
         destination.Author = source.Author;
         destination.AuthorMail = source.AuthorMail;

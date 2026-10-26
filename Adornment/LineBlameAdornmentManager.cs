@@ -241,7 +241,7 @@ namespace GitBlameForVs.Adornment
             return currentText != baselineText;
         }
 
-        private void RenderAdornment(ITextViewLine line, BlameInfo blame)
+        private void RenderAdornment(ITextViewLine line, BlameEntry blame)
         {
             string text = BlameText.Current.FormatInline(blame, _lastEditTime);
             Cursor cursor = blame.IsUncommitted ? Cursors.Arrow : Cursors.Hand;
@@ -293,7 +293,7 @@ namespace GitBlameForVs.Adornment
                 removedCallback: null);
         }
 
-        private async Task OnToolTipOpenedAsync(ToolTip toolTip, BlameInfo blame)
+        private async Task OnToolTipOpenedAsync(ToolTip toolTip, BlameEntry blame)
         {
             try
             {
@@ -306,7 +306,7 @@ namespace GitBlameForVs.Adornment
             }
         }
 
-        private async Task LoadTooltipContentAsync(ToolTip toolTip, BlameInfo blame)
+        private async Task LoadTooltipContentAsync(ToolTip toolTip, BlameEntry blame)
         {
             string? fullMessage = null;
             if (!blame.IsUncommitted)
@@ -322,7 +322,7 @@ namespace GitBlameForVs.Adornment
             toolTip.Content = BlameText.Current.FormatTooltip(blame, fullMessage);
         }
 
-        private void OnBlameLeftClick(TextBlock textBlock, BlameInfo blame)
+        private void OnBlameLeftClick(TextBlock textBlock, BlameEntry blame)
         {
             CopyToClipboardWithFeedback(textBlock, blame.CommitHash!, BlameText.Current.CopyHashFeedback);
         }

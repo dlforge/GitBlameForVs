@@ -24,7 +24,7 @@ namespace GitBlameForVs.Localization
             return Plural((int)(span.TotalDays / 365), "year");
         }
 
-        public string FormatInline(BlameInfo blame, DateTimeOffset? lastEditTime)
+        public string FormatInline(BlameEntry blame, DateTimeOffset? lastEditTime)
         {
             if (blame.IsUncommitted)
             {
@@ -34,7 +34,7 @@ namespace GitBlameForVs.Localization
             return $"{blame.Author}, {FormatRelativeTime(blame.AuthorTime)} • {blame.Summary}";
         }
 
-        public string FormatTooltip(BlameInfo blame, string? fullMessage)
+        public string FormatTooltip(BlameEntry blame, string? fullMessage)
         {
             if (blame.IsUncommitted) return "Uncommitted changes";
 

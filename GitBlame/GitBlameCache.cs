@@ -11,7 +11,7 @@ namespace GitBlameForVs.GitBlame
     public class GitBlameCache
     {
         // 按文件路径存放"整份文件的行号 -> blame 信息"映射
-        private readonly ConcurrentDictionary<string, Dictionary<int, BlameInfo>> _fileCache = new();
+        private readonly ConcurrentDictionary<string, Dictionary<int, BlameEntry>> _fileCache = new();
 
         private readonly Dictionary<string, Task<PrefetchResult>> _prefetchTasks = new();
         private readonly object _prefetchTasksLock = new();
@@ -23,7 +23,7 @@ namespace GitBlameForVs.GitBlame
         /// <param name="filePath"></param>
         /// <param name="line"></param>
         /// <returns></returns>
-        public async Task<BlameInfo?> GetOrFetchAsync(
+        public async Task<BlameEntry?> GetOrFetchAsync(
             string filePath,
             int line,
             CancellationToken cancellationToken = default)
@@ -124,13 +124,13 @@ namespace GitBlameForVs.GitBlame
 
         private sealed class PrefetchResult
         {
-            public PrefetchResult(Dictionary<int, BlameInfo>? blameByLine, Exception? error)
+            public PrefetchResult(Dictionary<int, BlameEntry>? blameByLine, Exception? error)
             {
                 BlameByLine = blameByLine;
                 Error = error;
             }
 
-            public Dictionary<int, BlameInfo>? BlameByLine { get; }
+            public Dictionary<int, BlameEntry>? BlameByLine { get; }
             public Exception? Error { get; }
         }
 

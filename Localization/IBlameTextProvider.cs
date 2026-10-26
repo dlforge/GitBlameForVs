@@ -32,9 +32,9 @@ namespace GitBlameForVs.Localization
         string FormatRelativeTime(DateTimeOffset time);
 
         /// <summary>行内 blame 文案。</summary>
-        string FormatInline(BlameInfo blame, DateTimeOffset? lastEditTime);
+        string FormatInline(BlameEntry blame, DateTimeOffset? lastEditTime);
 
         /// <summary>悬停 Tooltip 的完整信息文案。</summary>
-        string FormatTooltip(BlameInfo blame, string? fullMessage);
+        string FormatTooltip(BlameEntry blame, string? fullMessage);
     }
 }
