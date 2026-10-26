@@ -23,7 +23,7 @@ namespace GitBlameForVs.Adornment
     {
         public const string LayerName = "GitBlameForVsBlameLayer";
         private const int GitBlameMaxAuthorCharsDisplayed = 20;
-        private const double GitBlameGutterMarginRem = 0.5;
+        private const double GitBlameGutterMarginRem = 6;
         private const double GitBlameGutterGapRem = 0.5;
         private const double GitBlameAvatarSizeRem = 1.0;
         private const double InlineBlameHoverOpacity = 0.08;
@@ -277,9 +277,7 @@ namespace GitBlameForVs.Adornment
                 Background = Brushes.Transparent,
                 FontFamily = _textView.FormattedLineSource.DefaultTextProperties.Typeface.FontFamily
             };
-            FrameworkElement leadingMark = blame.IsUncommitted
-                ? CreateBlameIcon(foreground, gutterGap)
-                : CreateAuthorAvatar(blame, remSize * GitBlameAvatarSizeRem, gutterGap);
+            FrameworkElement leadingMark = CreateBlameIcon(foreground, gutterGap);
             var inlineBlame = new DockPanel
             {
                 LastChildFill = true,
