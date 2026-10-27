@@ -228,8 +228,7 @@ namespace GitBlameForVs.Adornment
                     _lastEditTime,
                     LoadCommitMessageAsync,
                     AuthorAvatarCache.GetOrFetchAsync,
-                    LoadCommitChangeStatsAsync,
-                    OpenCommitDetailsAsync);
+                    LoadCommitChangeStatsAsync);
         }
 
         private void RenderFailureAdornment(long generation, Exception error)
@@ -289,20 +288,6 @@ namespace GitBlameForVs.Adornment
             return workingDirectory != null
                 ? await _changeStatsCache.GetOrFetchAsync(workingDirectory, blame.CommitHash)
                 : null;
-        }
-
-        private async Task OpenCommitDetailsAsync(BlameEntry blame)
-        {
-            try
-            {
-                string repositoryPath = await Git.GetRepositoryRootAsync(GetFilePath())
-                    ?? throw new InvalidOperationException("The Git repository for this file could not be found.");
-                await VisualStudioCommitDetailsOpener.OpenAsync(repositoryPath, blame.CommitHash ?? string.Empty);
-            }
-            catch (Exception error)
-            {
-                Trace.TraceError($"Failed to open Visual Studio commit details: {error}");
-            }
         }
 
         private string GetFilePath() => _document?.FilePath ?? string.Empty;

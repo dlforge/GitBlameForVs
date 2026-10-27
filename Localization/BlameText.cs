@@ -12,7 +12,6 @@ namespace GitBlameForVs.Localization
         public static string CopyShaText => "Copy SHA";
         public static string CopyShaCopied => "Copied SHA";
         public static string CopyShaFailed => "Copy failed";
-        public static string ViewCommitDetailsText => "View commit details";
         public static string BlameTimedOut => "Git blame timed out";
         public static string BlameFailed => "Git blame failed";
 
