@@ -8,7 +8,7 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace GitBlameForVs.GitBlame
 {
-    public class GitBlameCache
+    public class BlameCache
     {
         // 按文件路径存放"整份文件的行号 -> blame 信息"映射
         private readonly ConcurrentDictionary<string, Dictionary<int, BlameEntry>> _fileCache = new();
