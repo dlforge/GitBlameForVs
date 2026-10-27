@@ -85,7 +85,8 @@ namespace GitBlameForVs.GitBlame
             DateTimeOffset? lastEditTime,
             Func<BlameEntry, Task<string?>> loadCommitMessage,
             Func<string?, Task<byte[]?>> loadAuthorAvatar,
-            Func<BlameEntry, Task<CommitChangeStats?>> loadCommitChangeStats)
+            Func<BlameEntry, Task<CommitChangeStats?>> loadCommitChangeStats,
+            Func<BlameEntry, Task> openCommitDetails)
         {
             double remSize = _textView.FormattedLineSource.DefaultTextProperties.FontRenderingEmSize;
             double gutterGap = remSize * GitBlameGutterGapRem;
@@ -128,6 +129,7 @@ namespace GitBlameForVs.GitBlame
                 loadCommitMessage,
                 loadAuthorAvatar,
                 loadCommitChangeStats,
+                openCommitDetails,
                 caretIsInUpperViewportHalf);
             if (!blame.IsUncommitted)
                 inlineBlameBorder.ContextMenu = CreateCommitContextMenu(blame);
@@ -392,6 +394,7 @@ namespace GitBlameForVs.GitBlame
             Func<BlameEntry, Task<string?>> loadCommitMessage,
             Func<string?, Task<byte[]?>> loadAuthorAvatar,
             Func<BlameEntry, Task<CommitChangeStats?>> loadCommitChangeStats,
+            Func<BlameEntry, Task> openCommitDetails,
             bool placeAbove)
         {
             var tooltipContent = new Border
@@ -472,7 +475,8 @@ namespace GitBlameForVs.GitBlame
                     blame,
                     loadCommitMessage,
                     loadAuthorAvatar,
-                    loadCommitChangeStats);
+                    loadCommitChangeStats,
+                    openCommitDetails);
             };
             popup.Closed += (_, _) =>
             {
@@ -556,7 +560,8 @@ namespace GitBlameForVs.GitBlame
             BlameEntry blame,
             Func<BlameEntry, Task<string?>> loadCommitMessage,
             Func<string?, Task<byte[]?>> loadAuthorAvatar,
-            Func<BlameEntry, Task<CommitChangeStats?>> loadCommitChangeStats)
+            Func<BlameEntry, Task<CommitChangeStats?>> loadCommitChangeStats,
+            Func<BlameEntry, Task> openCommitDetails)
         {
             try
             {
@@ -579,7 +584,11 @@ namespace GitBlameForVs.GitBlame
                 }
 
                 var commitTooltip = CreateCommitTooltipContent(
-                    blame, fullMessage, out var avatarImage, out var changeStatsText);
+                    blame,
+                    fullMessage,
+                    openCommitDetails,
+                    out var avatarImage,
+                    out var changeStatsText);
                 tooltipContent.Child = commitTooltip;
                 var pendingUpdates = new List<Task>(2);
                 if (avatarBytesTask != null)
@@ -617,6 +626,31 @@ namespace GitBlameForVs.GitBlame
             }
         }
 
+        private static void FormatChangeStatsText(TextBlock textBlock, CommitChangeStats changeStats)
+        {
+            textBlock.Inlines.Clear();
+            textBlock.Inlines.Add(new Run(
+                $"{changeStats.FilesChanged} {(changeStats.FilesChanged == 1 ? "file" : "files")} changed, "));
+            textBlock.Inlines.Add(CreateChangeStatRun(
+                $"+{changeStats.Insertions} {(changeStats.Insertions == 1 ? "insertion" : "insertions")}",
+                Color.FromRgb(0xD8, 0xF0, 0xDA),
+                Color.FromRgb(0x2F, 0x6B, 0x38)));
+            textBlock.Inlines.Add(new Run(", "));
+            textBlock.Inlines.Add(CreateChangeStatRun(
+                $"-{changeStats.Deletions} {(changeStats.Deletions == 1 ? "deletion" : "deletions")}",
+                Color.FromRgb(0xF6, 0xDE, 0xDE),
+                Color.FromRgb(0x8A, 0x3B, 0x3B)));
+        }
+
+        private static Run CreateChangeStatRun(string text, Color backgroundColor, Color foregroundColor)
+        {
+            return new Run(text)
+            {
+                Background = new SolidColorBrush(backgroundColor),
+                Foreground = new SolidColorBrush(foregroundColor)
+            };
+        }
+
         [System.Diagnostics.CodeAnalysis.SuppressMessage(
             "Usage",
             "VSTHRD003",
@@ -630,7 +664,7 @@ namespace GitBlameForVs.GitBlame
                 var changeStats = await changeStatsTask;
                 if (changeStats != null)
                 {
-                    changeStatsText.Text = BlameText.FormatChangeStats(changeStats);
+                    FormatChangeStatsText(changeStatsText, changeStats);
                     changeStatsText.Visibility = Visibility.Visible;
                 }
             }
@@ -667,6 +701,7 @@ namespace GitBlameForVs.GitBlame
         private FrameworkElement CreateCommitTooltipContent(
             BlameEntry blame,
             string? fullMessage,
+            Func<BlameEntry, Task> openCommitDetails,
             out Image avatarImage,
             out TextBlock changeStatsText)
         {
@@ -763,10 +798,17 @@ namespace GitBlameForVs.GitBlame
             {
                 Text = shortCommitHash,
                 Foreground = mutedForeground,
-                Cursor = Cursors.Arrow,
+                Cursor = Cursors.Hand,
+                ToolTip = BlameText.ViewCommitDetailsText,
                 FontFamily = font.Typeface.FontFamily,
                 FontSize = font.FontRenderingEmSize
             };
+            shortHash.MouseLeftButtonUp += (_, clickEvent) =>
+            {
+                clickEvent.Handled = true;
+                OpenCommitDetails(openCommitDetails, blame);
+            };
+
             var hashControls = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
@@ -816,6 +858,28 @@ namespace GitBlameForVs.GitBlame
             content.Children.Add(footer);
 
             return content;
+        }
+
+        [System.Diagnostics.CodeAnalysis.SuppressMessage(
+            "Usage",
+            "VSTHRD110",
+            Justification = "The WPF click handler cannot await this task; the continuation observes and logs faults.")]
+        private static void OpenCommitDetails(
+            Func<BlameEntry, Task> openCommitDetails,
+            BlameEntry blame)
+        {
+            try
+            {
+                openCommitDetails(blame).ContinueWith(
+                    task => Trace.TraceError($"Failed to open Visual Studio commit details: {task.Exception}"),
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted,
+                    TaskScheduler.Default);
+            }
+            catch (Exception error)
+            {
+                Trace.TraceError($"Failed to open Visual Studio commit details: {error}");
+            }
         }
     }
 }

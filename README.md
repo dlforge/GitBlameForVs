@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
+
 # Git Blame For Visual Studio
 
 在 Visual Studio 编辑器中，光标所在行自动内联显示 Git blame 信息 —— 无需切换窗口，随时知道这一行代码是谁改的、什么时候改的、为什么改。

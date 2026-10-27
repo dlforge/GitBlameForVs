@@ -145,6 +145,25 @@ public class Git
         return new CommitChangeStats(filesChanged, insertions, deletions);
     }
 
+    internal static async Task<string?> GetRepositoryRootAsync(
+        string filePath,
+        CancellationToken cancellationToken = default)
+    {
+        string? workingDirectory = Path.GetDirectoryName(filePath);
+        if (string.IsNullOrWhiteSpace(workingDirectory))
+            return null;
+
+        var result = await RunGitAsync(
+            CreateGitStartInfo("rev-parse --show-toplevel", workingDirectory),
+            "git rev-parse",
+            SingleLineBlameTimeout,
+            cancellationToken);
+        if (result.ExitCode != 0)
+            throw new GitCommandException("git rev-parse", result.ExitCode, result.StandardError);
+
+        return result.StandardOutput.Trim();
+    }
+
     /// <summary>
     /// 一次性获取整个文件所有行的 blame 信息。
     /// </summary>
