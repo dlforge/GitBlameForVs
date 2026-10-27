@@ -32,7 +32,6 @@ namespace GitBlameForVs.Adornment
         private const double GitBlameGutterMarginRem = 6;
         private const double GitBlameGutterGapRem = 0.5;
         private const double GitBlameAvatarSizeRem = 1.0;
-        private const double InlineBlameHoverOpacity = 0.08;
         private static readonly Color[] AuthorAvatarColors =
         {
             Color.FromRgb(0x6B, 0x8E, 0xC1),
@@ -147,11 +146,15 @@ namespace GitBlameForVs.Adornment
                 CornerRadius = new CornerRadius(2),
                 Padding = new Thickness(3, 1, 3, 1)
             };
-            var hoverBackground = CreateHoverBackgroundBrush();
-            inlineBlameBorder.MouseEnter += (_, _) => inlineBlameBorder.Background = hoverBackground;
-            inlineBlameBorder.MouseLeave += (_, _) => inlineBlameBorder.Background = Brushes.Transparent;
 
-            CreateTooltipPopup(inlineBlameBorder, blame, loadCommitMessage, loadAuthorAvatar);
+            bool caretIsInUpperViewportHalf =
+                line.TextTop < _textView.ViewportTop + _textView.ViewportHeight / 2;
+            CreateTooltipPopup(
+                inlineBlameBorder,
+                blame,
+                loadCommitMessage,
+                loadAuthorAvatar,
+                caretIsInUpperViewportHalf);
             if (!blame.IsUncommitted)
                 inlineBlameBorder.ContextMenu = CreateCommitContextMenu(blame);
 
@@ -181,14 +184,6 @@ namespace GitBlameForVs.Adornment
         private static extern int SetWindowCompositionAttribute(
             IntPtr windowHandle,
             ref WindowCompositionAttributeData data);
-
-        private Brush CreateHoverBackgroundBrush()
-        {
-            var foreground = _textView.FormattedLineSource.DefaultTextProperties.ForegroundBrush;
-            var hoverBackground = (Brush)foreground.CloneCurrentValue();
-            hoverBackground.Opacity *= InlineBlameHoverOpacity;
-            return hoverBackground;
-        }
 
         private static FrameworkElement CreateAuthorAvatar(
             BlameEntry blame,
@@ -328,6 +323,26 @@ namespace GitBlameForVs.Adornment
             return icon;
         }
 
+        private static Canvas CreateCheckIcon(Brush foreground)
+        {
+            var icon = new Canvas
+            {
+                Width = 12,
+                Height = 12,
+                IsHitTestVisible = false
+            };
+            icon.Children.Add(new WpfPath
+            {
+                Data = Geometry.Parse("M 2,6 L 5,9 L 10,3"),
+                Stroke = foreground,
+                StrokeThickness = 1.8,
+                StrokeLineJoin = PenLineJoin.Round,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round
+            });
+            return icon;
+        }
+
         private static Canvas CreateBlameIcon(Brush foreground, double gap)
         {
             var icon = new Canvas
@@ -395,7 +410,8 @@ namespace GitBlameForVs.Adornment
             Border anchor,
             BlameEntry blame,
             Func<BlameEntry, Task<string?>> loadCommitMessage,
-            Func<string?, Task<byte[]?>> loadAuthorAvatar)
+            Func<string?, Task<byte[]?>> loadAuthorAvatar,
+            bool placeAbove)
         {
             var tooltipContent = new Border
             {
@@ -422,10 +438,10 @@ namespace GitBlameForVs.Adornment
             {
                 AllowsTransparency = true,
                 Child = tooltipContent,
-                Placement = PlacementMode.RelativePoint,
+                Placement = placeAbove ? PlacementMode.Top : PlacementMode.Bottom,
                 PlacementTarget = anchor,
                 HorizontalOffset = 12,
-                VerticalOffset = 16,
+                VerticalOffset = placeAbove ? -12 : 12,
                 StaysOpen = true
             };
             var closeTimer = new DispatcherTimer
@@ -706,7 +722,7 @@ namespace GitBlameForVs.Adornment
                 FontWeight = FontWeights.SemiBold
             });
 
-            string? authorMail = blame.AuthorMail?.Trim('<', '>');
+            string? authorMail = blame.AuthorMail;
             if (!string.IsNullOrWhiteSpace(authorMail))
             {
                 authorHeader.Children.Add(new TextBlock
@@ -772,30 +788,8 @@ namespace GitBlameForVs.Adornment
                 VerticalAlignment = VerticalAlignment.Center
             };
             hashControls.Children.Add(shortHash);
-            Border? copyFeedback = null;
             if (!string.IsNullOrWhiteSpace(commitHash))
             {
-                copyFeedback = new Border
-                {
-                    BorderThickness = new Thickness(1),
-                    CornerRadius = new CornerRadius(4),
-                    Padding = new Thickness(6, 2, 6, 2),
-                    Margin = new Thickness(0, 6, 0, 0),
-                    HorizontalAlignment = HorizontalAlignment.Right,
-                    Visibility = Visibility.Collapsed,
-                    Child = new TextBlock
-                    {
-                        Text = BlameText.CopyShaText,
-                        FontFamily = font.Typeface.FontFamily,
-                        FontSize = font.FontRenderingEmSize,
-                        FontWeight = FontWeights.SemiBold
-                    }
-                };
-                copyFeedback.SetResourceReference(
-                    Border.BorderBrushProperty, EnvironmentColors.AccentBorderBrushKey);
-                ((TextBlock)copyFeedback.Child).SetResourceReference(
-                    TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
-
                 var copyButton = new Button
                 {
                     Content = CreateCopyIcon(mutedForeground),
@@ -815,7 +809,7 @@ namespace GitBlameForVs.Adornment
                     if (!TryCopyCommitHashToClipboard(commitHash))
                         return;
 
-                    copyFeedback.Visibility = Visibility.Visible;
+                    copyButton.Content = CreateCheckIcon(CreateTooltipMutedForegroundBrush());
                 };
                 hashControls.Children.Add(copyButton);
             }
@@ -830,8 +824,6 @@ namespace GitBlameForVs.Adornment
                 FontSize = font.FontRenderingEmSize
             });
             content.Children.Add(footer);
-            if (copyFeedback != null)
-                content.Children.Add(copyFeedback);
 
             return content;
         }
