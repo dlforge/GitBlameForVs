@@ -397,13 +397,21 @@ namespace GitBlameForVs.GitBlame
             Func<BlameEntry, Task> openCommitDetails,
             bool placeAbove)
         {
+            FrameworkElement initialContent = blame.IsUncommitted
+                ? CreateTooltipTextBlock(BlameText.FormatTooltip(blame, null))
+                : CreateCommitTooltipContent(
+                    blame,
+                    blame.Summary,
+                    openCommitDetails,
+                    out _,
+                    out _);
             var tooltipContent = new Border
             {
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(8),
                 Padding = new Thickness(8),
                 MaxWidth = 500,
-                Child = CreateTooltipTextBlock(BlameText.TooltipLoading),
+                Child = initialContent,
                 Effect = new DropShadowEffect
                 {
                     Color = Color.FromArgb(0x50, 0, 0, 0),

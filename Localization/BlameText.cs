@@ -7,7 +7,6 @@ namespace GitBlameForVs.Localization
 {
     internal static class BlameText
     {
-        public static string TooltipLoading => "Loading...";
         public static string TooltipLoadFailed => "Failed to load commit info";
         public static string CopyCommitHashMenuItem => "Copy commit SHA";
         public static string CopyShaText => "Copy SHA";
