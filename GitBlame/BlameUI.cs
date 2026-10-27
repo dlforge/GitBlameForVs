@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using GitBlameForVs.Localization;
 using Microsoft.VisualStudio.PlatformUI;
 using Microsoft.VisualStudio.Text;
@@ -83,7 +84,8 @@ namespace GitBlameForVs.GitBlame
             BlameEntry blame,
             DateTimeOffset? lastEditTime,
             Func<BlameEntry, Task<string?>> loadCommitMessage,
-            Func<string?, Task<byte[]?>> loadAuthorAvatar)
+            Func<string?, Task<byte[]?>> loadAuthorAvatar,
+            Func<BlameEntry, Task<CommitChangeStats?>> loadCommitChangeStats)
         {
             double remSize = _textView.FormattedLineSource.DefaultTextProperties.FontRenderingEmSize;
             double gutterGap = remSize * GitBlameGutterGapRem;
@@ -125,6 +127,7 @@ namespace GitBlameForVs.GitBlame
                 blame,
                 loadCommitMessage,
                 loadAuthorAvatar,
+                loadCommitChangeStats,
                 caretIsInUpperViewportHalf);
             if (!blame.IsUncommitted)
                 inlineBlameBorder.ContextMenu = CreateCommitContextMenu(blame);
@@ -388,6 +391,7 @@ namespace GitBlameForVs.GitBlame
             BlameEntry blame,
             Func<BlameEntry, Task<string?>> loadCommitMessage,
             Func<string?, Task<byte[]?>> loadAuthorAvatar,
+            Func<BlameEntry, Task<CommitChangeStats?>> loadCommitChangeStats,
             bool placeAbove)
         {
             var tooltipContent = new Border
@@ -464,7 +468,11 @@ namespace GitBlameForVs.GitBlame
 
                 tooltipContentRequested = true;
                 _ = LoadTooltipContentAsync(
-                    tooltipContent, blame, loadCommitMessage, loadAuthorAvatar);
+                    tooltipContent,
+                    blame,
+                    loadCommitMessage,
+                    loadAuthorAvatar,
+                    loadCommitChangeStats);
             };
             popup.Closed += (_, _) =>
             {
@@ -547,7 +555,8 @@ namespace GitBlameForVs.GitBlame
             Border tooltipContent,
             BlameEntry blame,
             Func<BlameEntry, Task<string?>> loadCommitMessage,
-            Func<string?, Task<byte[]?>> loadAuthorAvatar)
+            Func<string?, Task<byte[]?>> loadAuthorAvatar,
+            Func<BlameEntry, Task<CommitChangeStats?>> loadCommitChangeStats)
         {
             try
             {
@@ -555,6 +564,9 @@ namespace GitBlameForVs.GitBlame
                     !string.IsNullOrWhiteSpace(blame.AuthorMail)
                         ? loadAuthorAvatar(blame.AuthorMail)
                         : null;
+                Task<CommitChangeStats?>? changeStatsTask = blame.IsUncommitted
+                    ? null
+                    : loadCommitChangeStats(blame);
                 string? fullMessage = blame.IsUncommitted
                     ? null
                     : await loadCommitMessage(blame);
@@ -566,23 +578,65 @@ namespace GitBlameForVs.GitBlame
                     return;
                 }
 
-                var commitTooltip = CreateCommitTooltipContent(blame, fullMessage, out var avatarImage);
+                var commitTooltip = CreateCommitTooltipContent(
+                    blame, fullMessage, out var avatarImage, out var changeStatsText);
                 tooltipContent.Child = commitTooltip;
+                var pendingUpdates = new List<Task>(2);
                 if (avatarBytesTask != null)
+                    pendingUpdates.Add(UpdateAuthorAvatarAsync(avatarBytesTask, avatarImage));
+                if (changeStatsTask != null)
+                    pendingUpdates.Add(UpdateChangeStatsAsync(changeStatsTask, changeStatsText));
+                await Task.WhenAll(pendingUpdates);
+            }
+            catch (Exception error)
+            {
+                Trace.TraceError($"Failed to load Git commit details: {error}");
+                tooltipContent.Child = CreateTooltipTextBlock(BlameText.TooltipLoadFailed);
+            }
+        }
+
+        [System.Diagnostics.CodeAnalysis.SuppressMessage(
+            "Usage",
+            "VSTHRD003",
+            Justification = "The decoded image is assigned to a WPF control and must resume on the UI dispatcher.")]
+        private static async Task UpdateAuthorAvatarAsync(Task<byte[]?> avatarBytesTask, Image avatarImage)
+        {
+            try
+            {
+                var avatarBytes = await avatarBytesTask;
+                var avatarSource = DecodeAvatarImage(avatarBytes);
+                if (avatarSource != null)
                 {
-                    var avatarBytes = await avatarBytesTask;
-                    var avatarSource = DecodeAvatarImage(avatarBytes);
-                    if (avatarSource != null)
-                    {
-                        avatarImage.Source = avatarSource;
-                        avatarImage.Visibility = Visibility.Visible;
-                    }
+                    avatarImage.Source = avatarSource;
+                    avatarImage.Visibility = Visibility.Visible;
                 }
             }
             catch (Exception error)
             {
-                Trace.TraceError($"Failed to load Git commit message: {error}");
-                tooltipContent.Child = CreateTooltipTextBlock(BlameText.TooltipLoadFailed);
+                Trace.TraceWarning($"Failed to load author avatar: {error.Message}");
+            }
+        }
+
+        [System.Diagnostics.CodeAnalysis.SuppressMessage(
+            "Usage",
+            "VSTHRD003",
+            Justification = "The statistics text is updated in the WPF visual tree and must resume on the UI dispatcher.")]
+        private static async Task UpdateChangeStatsAsync(
+            Task<CommitChangeStats?> changeStatsTask,
+            TextBlock changeStatsText)
+        {
+            try
+            {
+                var changeStats = await changeStatsTask;
+                if (changeStats != null)
+                {
+                    changeStatsText.Text = BlameText.FormatChangeStats(changeStats);
+                    changeStatsText.Visibility = Visibility.Visible;
+                }
+            }
+            catch (Exception error)
+            {
+                Trace.TraceWarning($"Failed to load Git commit change statistics: {error.Message}");
             }
         }
 
@@ -613,7 +667,8 @@ namespace GitBlameForVs.GitBlame
         private FrameworkElement CreateCommitTooltipContent(
             BlameEntry blame,
             string? fullMessage,
-            out Image avatarImage)
+            out Image avatarImage,
+            out TextBlock changeStatsText)
         {
             var font = _textView.FormattedLineSource.DefaultTextProperties;
             var mutedForeground = CreateTooltipMutedForegroundBrush();
@@ -661,6 +716,16 @@ namespace GitBlameForVs.GitBlame
                 Background = mutedForeground,
                 Margin = new Thickness(0, 0, 0, 6)
             });
+
+            changeStatsText = new TextBlock
+            {
+                Foreground = mutedForeground,
+                FontFamily = font.Typeface.FontFamily,
+                FontSize = font.FontRenderingEmSize,
+                Margin = new Thickness(0, 0, 0, 6),
+                Visibility = Visibility.Collapsed
+            };
+            content.Children.Add(changeStatsText);
 
             var commitMessage = !string.IsNullOrWhiteSpace(fullMessage)
                 ? fullMessage

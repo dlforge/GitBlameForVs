@@ -18,6 +18,7 @@ namespace GitBlameForVs.Adornment
         private readonly BlameUI _blameUI;
         private readonly BlameCache _cache = new();
         private readonly CommitMessageCache _messageCache = new();
+        private readonly CommitChangeStatsCache _changeStatsCache = new();
         private readonly ITextDocument? _document;
         private ITextSnapshot? _baselineSnapshot;
         private CancellationTokenSource? _debounceCts;
@@ -226,7 +227,8 @@ namespace GitBlameForVs.Adornment
                     blame,
                     _lastEditTime,
                     LoadCommitMessageAsync,
-                    AuthorAvatarCache.GetOrFetchAsync);
+                    AuthorAvatarCache.GetOrFetchAsync,
+                    LoadCommitChangeStatsAsync);
         }
 
         private void RenderFailureAdornment(long generation, Exception error)
@@ -273,6 +275,18 @@ namespace GitBlameForVs.Adornment
 
             return workingDirectory != null
                 ? await _messageCache.GetOrFetchAsync(workingDirectory, blame.CommitHash)
+                : null;
+        }
+
+        private async Task<CommitChangeStats?> LoadCommitChangeStatsAsync(BlameEntry blame)
+        {
+            string filePath = GetFilePath();
+            string? workingDirectory = string.IsNullOrEmpty(filePath)
+                ? null
+                : Path.GetDirectoryName(filePath);
+
+            return workingDirectory != null
+                ? await _changeStatsCache.GetOrFetchAsync(workingDirectory, blame.CommitHash)
                 : null;
         }
 

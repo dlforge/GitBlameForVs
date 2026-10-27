@@ -46,6 +46,16 @@ namespace GitBlameForVs.Localization
         public static string FormatAbsoluteTime(DateTimeOffset time) =>
             time.ToLocalTime().ToString("MMM d, yyyy h:mm tt");
 
+        public static string FormatChangeStats(CommitChangeStats changeStats)
+        {
+            string fileLabel = changeStats.FilesChanged == 1 ? "file" : "files";
+            string insertionLabel = changeStats.Insertions == 1 ? "insertion" : "insertions";
+            string deletionLabel = changeStats.Deletions == 1 ? "deletion" : "deletions";
+            return $"{changeStats.FilesChanged} {fileLabel} changed, " +
+                $"{changeStats.Insertions} {insertionLabel}(+), " +
+                $"{changeStats.Deletions} {deletionLabel}(-)";
+        }
+
         public static string FormatTooltip(BlameEntry blame, string? fullMessage)
         {
             if (blame.IsUncommitted)

@@ -90,6 +90,61 @@ public class Git
         return result.StandardOutput.Trim();
     }
 
+    internal static async Task<CommitChangeStats?> GetCommitChangeStatsAsync(
+        string workingDir,
+        string commitHash,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsObjectId(commitHash) || IsZeroObjectId(commitHash))
+            return null;
+
+        var result = await RunGitAsync(
+            CreateGitStartInfo(
+                $"diff-tree --root --first-parent --no-commit-id --numstat -r --no-renames -z {commitHash}",
+                workingDir),
+            "git diff-tree",
+            CommitMessageTimeout,
+            cancellationToken);
+
+        if (result.ExitCode != 0)
+            throw new GitCommandException("git diff-tree", result.ExitCode, result.StandardError);
+
+        int filesChanged = 0;
+        int insertions = 0;
+        int deletions = 0;
+        foreach (string fileStats in result.StandardOutput.Split('\0'))
+        {
+            if (string.IsNullOrEmpty(fileStats))
+                continue;
+
+            int firstTab = fileStats.IndexOf('\t');
+            int secondTab = firstTab < 0 ? -1 : fileStats.IndexOf('\t', firstTab + 1);
+            if (secondTab < 0)
+                continue;
+
+            filesChanged++;
+            if (int.TryParse(
+                    fileStats.Substring(0, firstTab),
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out int fileInsertions))
+            {
+                insertions += fileInsertions;
+            }
+
+            if (int.TryParse(
+                    fileStats.Substring(firstTab + 1, secondTab - firstTab - 1),
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out int fileDeletions))
+            {
+                deletions += fileDeletions;
+            }
+        }
+
+        return new CommitChangeStats(filesChanged, insertions, deletions);
+    }
+
     /// <summary>
     /// 一次性获取整个文件所有行的 blame 信息。
     /// </summary>
