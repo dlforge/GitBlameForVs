@@ -417,6 +417,7 @@ namespace GitBlameForVs.GitBlame
                 Child = tooltipContent,
                 Placement = placeAbove ? PlacementMode.Top : PlacementMode.Bottom,
                 PlacementTarget = anchor,
+                PopupAnimation = PopupAnimation.Fade,
                 HorizontalOffset = 12,
                 VerticalOffset = placeAbove ? -12 : 12,
                 StaysOpen = true
