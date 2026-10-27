@@ -1,4 +1,3 @@
-using GitBlameForVs.GitBlame;
 using GitBlameForVs.Localization;
 using Microsoft.VisualStudio.PlatformUI;
 using Microsoft.VisualStudio.Text;
@@ -24,7 +23,7 @@ using System.Windows.Threading;
 using Ellipse = System.Windows.Shapes.Ellipse;
 using WpfPath = System.Windows.Shapes.Path;
 
-namespace GitBlameForVs.Adornment
+namespace GitBlameForVs.GitBlame
 {
     internal sealed class BlameUI
     {
