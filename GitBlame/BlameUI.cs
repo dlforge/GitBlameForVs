@@ -9,13 +9,13 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
-using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
@@ -42,34 +42,6 @@ namespace GitBlameForVs.GitBlame
             Color.FromRgb(0x5D, 0x83, 0xA1),
             Color.FromRgb(0x9A, 0x7C, 0x4F)
         };
-
-        private enum AccentState
-        {
-            Disabled = 0,
-            EnableAcrylicBlurBehind = 4
-        }
-
-        private enum WindowCompositionAttribute
-        {
-            AccentPolicy = 19
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct AccentPolicy
-        {
-            public AccentState State;
-            public uint Flags;
-            public uint GradientColor;
-            public uint AnimationId;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct WindowCompositionAttributeData
-        {
-            public WindowCompositionAttribute Attribute;
-            public IntPtr Data;
-            public int SizeOfData;
-        }
 
         private readonly IWpfTextView _textView;
         private readonly IAdornmentLayer? _layer;
@@ -179,11 +151,6 @@ namespace GitBlameForVs.GitBlame
             return mutedForeground;
         }
 
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern int SetWindowCompositionAttribute(
-            IntPtr windowHandle,
-            ref WindowCompositionAttributeData data);
-
         private static FrameworkElement CreateAuthorAvatar(
             BlameEntry blame,
             double size,
@@ -290,16 +257,27 @@ namespace GitBlameForVs.GitBlame
 
         private static bool TryCopyCommitHashToClipboard(string commitHash)
         {
-            try
+            for (int attempt = 0; attempt < 3; attempt++)
             {
-                Clipboard.SetText(commitHash);
-                return true;
+                try
+                {
+                    Clipboard.SetDataObject(commitHash, true);
+                    return true;
+                }
+                catch (ExternalException error) when (attempt < 2)
+                {
+                    Trace.TraceInformation($"Clipboard is busy while copying the Git commit hash: {error.Message}");
+                    Thread.Sleep(50 * (attempt + 1));
+                }
+                catch (Exception error)
+                {
+                    Trace.TraceError($"Failed to copy Git commit hash: {error}");
+                    return false;
+                }
             }
-            catch (Exception error)
-            {
-                Trace.TraceError($"Failed to copy Git commit hash: {error}");
-                return false;
-            }
+
+            Trace.TraceError("Failed to copy Git commit hash after retrying because the clipboard remained busy.");
+            return false;
         }
 
         private static Canvas CreateCopyIcon(Brush foreground)
@@ -427,7 +405,7 @@ namespace GitBlameForVs.GitBlame
                     Opacity = 0.55
                 }
             };
-            tooltipContent.Background = Brushes.Transparent;
+            ApplyPopupTheme(tooltipContent);
             tooltipContent.SetResourceReference(
                 Border.BorderBrushProperty, EnvironmentColors.ToolWindowBorderBrushKey);
             tooltipContent.SetResourceReference(
@@ -449,7 +427,7 @@ namespace GitBlameForVs.GitBlame
             };
             bool tooltipContentRequested = false;
             bool themeChangedSubscribed = false;
-            ThemeChangedEventHandler themeChangedHandler = _ => ApplyPopupAcrylic(popup, tooltipContent);
+            ThemeChangedEventHandler themeChangedHandler = _ => ApplyPopupTheme(tooltipContent);
 
             closeTimer.Tick += (_, _) =>
             {
@@ -473,7 +451,7 @@ namespace GitBlameForVs.GitBlame
             };
             popup.Opened += (_, _) =>
             {
-                ApplyPopupAcrylic(popup, tooltipContent);
+                ApplyPopupTheme(tooltipContent);
                 if (!themeChangedSubscribed)
                 {
                     VSColorTheme.ThemeChanged += themeChangedHandler;
@@ -511,66 +489,12 @@ namespace GitBlameForVs.GitBlame
             }
         }
 
-        private static void ApplyPopupAcrylic(Popup popup, Border tooltipContent)
-        {
-            try
-            {
-                if (popup.Child is not Visual popupVisual ||
-                    PresentationSource.FromVisual(popupVisual) is not HwndSource source)
-                {
-                    SetFallbackTooltipBackground(tooltipContent);
-                    return;
-                }
-
-                var themeColor = VSColorTheme.GetThemedColor(
-                    EnvironmentColors.ToolWindowBackgroundColorKey);
-                var accentColor = VSColorTheme.GetThemedColor(
-                    EnvironmentColors.AccentPaleColorKey);
-                var accentPolicy = new AccentPolicy
-                {
-                    State = AccentState.EnableAcrylicBlurBehind,
-                    GradientColor = (0xC8U << 24) |
-                        ((uint)themeColor.B << 16) |
-                        ((uint)themeColor.G << 8) |
-                        themeColor.R
-                };
-                int accentPolicySize = Marshal.SizeOf(typeof(AccentPolicy));
-                IntPtr accentPolicyPointer = Marshal.AllocHGlobal(accentPolicySize);
-                try
-                {
-                    Marshal.StructureToPtr(accentPolicy, accentPolicyPointer, false);
-                    var compositionData = new WindowCompositionAttributeData
-                    {
-                        Attribute = WindowCompositionAttribute.AccentPolicy,
-                        Data = accentPolicyPointer,
-                        SizeOfData = accentPolicySize
-                    };
-                    if (SetWindowCompositionAttribute(source.Handle, ref compositionData) != 0)
-                    {
-                        tooltipContent.Background = CreateTooltipGradient(
-                            ToMediaColor(themeColor), ToMediaColor(accentColor), acrylic: true);
-                        return;
-                    }
-                }
-                finally
-                {
-                    Marshal.FreeHGlobal(accentPolicyPointer);
-                }
-            }
-            catch (Exception error)
-            {
-                Trace.TraceInformation($"Acrylic blame popup is unavailable: {error.Message}");
-            }
-
-            SetFallbackTooltipBackground(tooltipContent);
-        }
-
-        private static void SetFallbackTooltipBackground(Border tooltipContent)
+        private static void ApplyPopupTheme(Border tooltipContent)
         {
             var themeColor = VSColorTheme.GetThemedColor(EnvironmentColors.ToolWindowBackgroundColorKey);
             var accentColor = VSColorTheme.GetThemedColor(EnvironmentColors.AccentPaleColorKey);
             tooltipContent.Background = CreateTooltipGradient(
-                ToMediaColor(themeColor), ToMediaColor(accentColor), acrylic: false);
+                ToMediaColor(themeColor), ToMediaColor(accentColor));
         }
 
         private static Color ToMediaColor(System.Drawing.Color color) =>
@@ -578,33 +502,29 @@ namespace GitBlameForVs.GitBlame
 
         private static LinearGradientBrush CreateTooltipGradient(
             Color themeColor,
-            Color accentColor,
-            bool acrylic)
+            Color accentColor)
         {
-            byte topOpacity = acrylic ? (byte)0x52 : (byte)0xFF;
-            byte middleOpacity = acrylic ? (byte)0x38 : (byte)0xFF;
-            byte bottomOpacity = acrylic ? (byte)0x60 : (byte)0xFF;
             var gradient = new LinearGradientBrush
             {
                 StartPoint = new Point(0, 0),
                 EndPoint = new Point(0, 1)
             };
             gradient.GradientStops.Add(new GradientStop(
-                BlendThemeColor(themeColor, accentColor, 0.22, topOpacity), 0));
+                BlendThemeColor(themeColor, accentColor, 0.22), 0));
             gradient.GradientStops.Add(new GradientStop(
-                BlendThemeColor(themeColor, accentColor, 0.06, middleOpacity), 0.48));
+                BlendThemeColor(themeColor, accentColor, 0.06), 0.48));
             gradient.GradientStops.Add(new GradientStop(
-                BlendThemeColor(themeColor, accentColor, 0.16, bottomOpacity), 1));
+                BlendThemeColor(themeColor, accentColor, 0.16), 1));
             return gradient;
         }
 
-        private static Color BlendThemeColor(Color themeColor, Color accentColor, double accentWeight, byte opacity)
+        private static Color BlendThemeColor(Color themeColor, Color accentColor, double accentWeight)
         {
             byte BlendChannel(byte themeChannel, byte accentChannel) =>
                 (byte)Math.Round(themeChannel * (1 - accentWeight) + accentChannel * accentWeight);
 
             return Color.FromArgb(
-                opacity,
+                byte.MaxValue,
                 BlendChannel(themeColor.R, accentColor.R),
                 BlendChannel(themeColor.G, accentColor.G),
                 BlendChannel(themeColor.B, accentColor.B));
@@ -806,9 +726,14 @@ namespace GitBlameForVs.GitBlame
                 copyButton.Click += (_, _) =>
                 {
                     if (!TryCopyCommitHashToClipboard(commitHash))
+                    {
+                        copyButton.Content = CreateCopyIcon(mutedForeground);
+                        copyButton.ToolTip = BlameText.CopyShaFailed;
                         return;
+                    }
 
                     copyButton.Content = CreateCheckIcon(CreateTooltipMutedForegroundBrush());
+                    copyButton.ToolTip = BlameText.CopyShaCopied;
                 };
                 hashControls.Children.Add(copyButton);
             }
