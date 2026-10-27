@@ -28,7 +28,7 @@ namespace GitBlameForVs.GitBlame
     internal sealed class BlameUI
     {
         private const int GitBlameMaxAuthorCharsDisplayed = 20;
-        private const double GitBlameGutterMarginRem = 6;
+        private const double GitBlameGutterMarginRem = 4;
         private const double GitBlameGutterGapRem = 0.5;
         private const double GitBlameAvatarSizeRem = 1.0;
         private const double InlineBlameHoverOpacity = 0.08;
