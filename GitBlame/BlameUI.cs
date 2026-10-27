@@ -264,7 +264,7 @@ namespace GitBlameForVs.GitBlame
             {
                 try
                 {
-                    Clipboard.SetDataObject(commitHash, true);
+                    Clipboard.SetText(commitHash, TextDataFormat.UnicodeText);
                     return true;
                 }
                 catch (ExternalException error) when (attempt < 2)
@@ -394,11 +394,48 @@ namespace GitBlameForVs.GitBlame
             Func<BlameEntry, Task<CommitChangeStats?>> loadCommitChangeStats,
             bool placeAbove)
         {
+            var closeTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(250)
+            };
+            var popup = new Popup
+            {
+                AllowsTransparency = true,
+                Placement = placeAbove ? PlacementMode.Top : PlacementMode.Bottom,
+                PlacementTarget = anchor,
+                PopupAnimation = PopupAnimation.Slide,
+                HorizontalOffset = 12,
+                VerticalOffset = placeAbove ? -12 : 12,
+                StaysOpen = true
+            };
+            bool popupDismissedUntilAnchorMouseLeave = false;
+            var copyCloseTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(500)
+            };
+            Action closePopup = () =>
+            {
+                closeTimer.Stop();
+                popupDismissedUntilAnchorMouseLeave = true;
+                popup.IsOpen = false;
+                closeTimer.Start();
+            };
+            copyCloseTimer.Tick += (_, _) =>
+            {
+                copyCloseTimer.Stop();
+                closePopup();
+            };
+            Action schedulePopupCloseAfterCopy = () =>
+            {
+                copyCloseTimer.Stop();
+                copyCloseTimer.Start();
+            };
             FrameworkElement initialContent = blame.IsUncommitted
                 ? CreateTooltipTextBlock(BlameText.FormatTooltip(blame, null))
                 : CreateCommitTooltipContent(
                     blame,
                     blame.Summary,
+                    schedulePopupCloseAfterCopy,
                     out _,
                     out _);
             var tooltipContent = new Border
@@ -421,22 +458,7 @@ namespace GitBlameForVs.GitBlame
                 Border.BorderBrushProperty, EnvironmentColors.ToolWindowBorderBrushKey);
             tooltipContent.SetResourceReference(
                 TextElement.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
-
-            var popup = new Popup
-            {
-                AllowsTransparency = true,
-                Child = tooltipContent,
-                Placement = placeAbove ? PlacementMode.Top : PlacementMode.Bottom,
-                PlacementTarget = anchor,
-                PopupAnimation = PopupAnimation.Slide,
-                HorizontalOffset = 12,
-                VerticalOffset = placeAbove ? -12 : 12,
-                StaysOpen = true
-            };
-            var closeTimer = new DispatcherTimer
-            {
-                Interval = TimeSpan.FromMilliseconds(250)
-            };
+            popup.Child = tooltipContent;
             bool tooltipContentRequested = false;
             bool themeChangedSubscribed = false;
             ThemeChangedEventHandler themeChangedHandler = _ => ApplyPopupTheme(tooltipContent);
@@ -444,21 +466,37 @@ namespace GitBlameForVs.GitBlame
             closeTimer.Tick += (_, _) =>
             {
                 closeTimer.Stop();
+                if (popupDismissedUntilAnchorMouseLeave)
+                {
+                    if (!anchor.IsMouseOver)
+                        popupDismissedUntilAnchorMouseLeave = false;
+
+                    return;
+                }
+
                 if (!anchor.IsMouseOver && !tooltipContent.IsMouseOver)
                     popup.IsOpen = false;
             };
             anchor.MouseEnter += (_, _) =>
             {
+                if (popupDismissedUntilAnchorMouseLeave)
+                    return;
+
                 closeTimer.Stop();
                 UpdatePopupPosition();
                 popup.IsOpen = true;
             };
-            anchor.MouseLeave += (_, _) => SchedulePopupClose();
+            anchor.MouseLeave += (_, _) =>
+            {
+                popupDismissedUntilAnchorMouseLeave = false;
+                SchedulePopupClose();
+            };
             tooltipContent.MouseEnter += (_, _) => closeTimer.Stop();
             tooltipContent.MouseLeave += (_, _) => SchedulePopupClose();
             anchor.Unloaded += (_, _) =>
             {
                 closeTimer.Stop();
+                copyCloseTimer.Stop();
                 popup.IsOpen = false;
             };
             popup.Opened += (_, _) =>
@@ -479,10 +517,12 @@ namespace GitBlameForVs.GitBlame
                     blame,
                     loadCommitMessage,
                     loadAuthorAvatar,
-                    loadCommitChangeStats);
+                    loadCommitChangeStats,
+                    schedulePopupCloseAfterCopy);
             };
             popup.Closed += (_, _) =>
             {
+                copyCloseTimer.Stop();
                 if (!themeChangedSubscribed)
                     return;
 
@@ -563,7 +603,8 @@ namespace GitBlameForVs.GitBlame
             BlameEntry blame,
             Func<BlameEntry, Task<string?>> loadCommitMessage,
             Func<string?, Task<byte[]?>> loadAuthorAvatar,
-            Func<BlameEntry, Task<CommitChangeStats?>> loadCommitChangeStats)
+            Func<BlameEntry, Task<CommitChangeStats?>> loadCommitChangeStats,
+            Action schedulePopupCloseAfterCopy)
         {
             try
             {
@@ -588,6 +629,7 @@ namespace GitBlameForVs.GitBlame
                 var commitTooltip = CreateCommitTooltipContent(
                     blame,
                     fullMessage,
+                    schedulePopupCloseAfterCopy,
                     out var avatarImage,
                     out var changeStatsText);
                 tooltipContent.Child = commitTooltip;
@@ -702,6 +744,7 @@ namespace GitBlameForVs.GitBlame
         private FrameworkElement CreateCommitTooltipContent(
             BlameEntry blame,
             string? fullMessage,
+            Action schedulePopupCloseAfterCopy,
             out Image avatarImage,
             out TextBlock changeStatsText)
         {
@@ -835,6 +878,7 @@ namespace GitBlameForVs.GitBlame
 
                     copyButton.Content = CreateCheckIcon(CreateTooltipMutedForegroundBrush());
                     copyButton.ToolTip = BlameText.CopyShaCopied;
+                    schedulePopupCloseAfterCopy();
                 };
                 hashControls.Children.Add(copyButton);
             }
