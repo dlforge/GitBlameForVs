@@ -1,4 +1,3 @@
-using GitBlameForVs.GitBlame;
 using GitBlameForVs.Localization;
 using Microsoft.VisualStudio.PlatformUI;
 using Microsoft.VisualStudio.Text;
@@ -24,12 +23,12 @@ using System.Windows.Threading;
 using Ellipse = System.Windows.Shapes.Ellipse;
 using WpfPath = System.Windows.Shapes.Path;
 
-namespace GitBlameForVs.Adornment
+namespace GitBlameForVs.GitBlame
 {
     internal sealed class BlameUI
     {
         private const int GitBlameMaxAuthorCharsDisplayed = 20;
-        private const double GitBlameGutterMarginRem = 6;
+        private const double GitBlameGutterMarginRem = 4;
         private const double GitBlameGutterGapRem = 0.5;
         private const double GitBlameAvatarSizeRem = 1.0;
         private static readonly Color[] AuthorAvatarColors =

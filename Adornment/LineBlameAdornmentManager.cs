@@ -16,7 +16,7 @@ namespace GitBlameForVs.Adornment
 
         private readonly IWpfTextView _textView;
         private readonly BlameUI _blameUI;
-        private readonly GitBlameCache _cache = new();
+        private readonly BlameCache _cache = new();
         private readonly CommitMessageCache _messageCache = new();
         private readonly ITextDocument? _document;
         private ITextSnapshot? _baselineSnapshot;
